@@ -501,7 +501,7 @@ static void computeKnownBitsFromAssume(Value *V, APInt &KnownZero,
     assert(isa<IntrinsicInst>(I) &&
            dyn_cast<IntrinsicInst>(I)->getIntrinsicID() == Intrinsic::assume &&
            "must be an assume intrinsic");
-
+    
     Value *Arg = I->getArgOperand(0);
 
     if (Arg == V &&
@@ -848,7 +848,7 @@ void computeKnownBits(Value *V, APInt &KnownZero, APInt &KnownOne,
   // Limit search depth.
   // All recursive calls that increase depth must come after this.
   if (Depth == MaxDepth)
-    return;
+    return;  
 
   // A weak GlobalAlias is totally unknown. A non-weak GlobalAlias has
   // the bits of its aliasee.
@@ -1559,7 +1559,7 @@ bool isKnownNonZero(Value *V, const DataLayout *TD, unsigned Depth,
   // Check for pointer simplifications.
   if (V->getType()->isPointerTy()) {
     if (isKnownNonNull(V))
-      return true;
+      return true; 
     if (GEPOperator *GEP = dyn_cast<GEPOperator>(V))
       if (isGEPKnownNonNull(GEP, TD, Depth, Q))
         return true;
@@ -2058,7 +2058,7 @@ bool llvm::CannotBeOrderedLessThanZero(const Value *V, unsigned Depth) {
   default: break;
   case Instruction::FMul:
     // x*x is always non-negative or a NaN.
-    if (I->getOperand(0) == I->getOperand(1))
+    if (I->getOperand(0) == I->getOperand(1)) 
       return true;
     // Fall through
   case Instruction::FAdd:
@@ -2070,8 +2070,8 @@ bool llvm::CannotBeOrderedLessThanZero(const Value *V, unsigned Depth) {
   case Instruction::FPTrunc:
     // Widening/narrowing never change sign.
     return CannotBeOrderedLessThanZero(I->getOperand(0), Depth+1);
-  case Instruction::Call:
-    if (const IntrinsicInst *II = dyn_cast<IntrinsicInst>(I))
+  case Instruction::Call: 
+    if (const IntrinsicInst *II = dyn_cast<IntrinsicInst>(I)) 
       switch (II->getIntrinsicID()) {
       default: break;
       case Intrinsic::exp:
@@ -2079,7 +2079,7 @@ bool llvm::CannotBeOrderedLessThanZero(const Value *V, unsigned Depth) {
       case Intrinsic::fabs:
       case Intrinsic::sqrt:
         return true;
-      case Intrinsic::powi:
+      case Intrinsic::powi: 
         if (ConstantInt *CI = dyn_cast<ConstantInt>(I->getOperand(1))) {
           // powi(x,n) is non-negative if n is even.
           if (CI->getBitWidth() <= 64 && CI->getSExtValue() % 2u == 0)
@@ -2089,12 +2089,12 @@ bool llvm::CannotBeOrderedLessThanZero(const Value *V, unsigned Depth) {
       case Intrinsic::fma:
       case Intrinsic::fmuladd:
         // x*x+y is non-negative if y is non-negative.
-        return I->getOperand(0) == I->getOperand(1) &&
+        return I->getOperand(0) == I->getOperand(1) && 
                CannotBeOrderedLessThanZero(I->getOperand(2), Depth+1);
       }
     break;
   }
-  return false;
+  return false; 
 }
 
 /// If the specified value can be set by repeating the same byte in memory,
@@ -2632,7 +2632,7 @@ bool llvm::isSafeToSpeculativelyExecute(const Value *V,
         // Speculative load may create a race that did not exist in the source.
         LI->getParent()->getParent()->hasFnAttribute(Attribute::SanitizeThread))
       return false;
-    return true; // LI->getPointerOperand()->isDereferenceablePointer(TD);
+    return true; //LI->getPointerOperand()->isDereferenceablePointer(TD);
   }
   case Instruction::Call: {
     if (const IntrinsicInst *II = dyn_cast<IntrinsicInst>(Inst)) {
@@ -2708,7 +2708,7 @@ bool llvm::isKnownNonNull(const Value *V, const TargetLibraryInfo *TLI) {
   if (const GlobalValue *GV = dyn_cast<GlobalValue>(V))
     return !GV->hasExternalWeakLinkage();
 
-  // A Load tagged w/nonnull metadata is never null.
+  // A Load tagged w/nonnull metadata is never null. 
   if (const LoadInst *LI = dyn_cast<LoadInst>(V))
     return LI->getMetadata(LLVMContext::MD_nonnull);
 
