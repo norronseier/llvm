@@ -14,8 +14,8 @@ with caution.  Because the intrinsics have experimental status,
 compatibility across LLVM releases is not guaranteed.
 
 LLVM currently supports an alternate mechanism for conservative
-garbage collection support using the gc_root intrinsic.  The mechanism
-described here shares little in common with the alternate
+garbage collection support using the ``gcroot`` intrinsic.  The mechanism
+described here shares little in common with the alternate ``gcroot``
 implementation and it is hoped that this mechanism will eventually
 replace the gc_root mechanism.
 
@@ -111,8 +111,8 @@ garbage collected objects.
   collected values, transforming the IR to expose a pointer giving the
   base object for every such live pointer, and inserting all the
   intrinsics correctly is explicitly out of scope for this document.
-  The recommended approach is described in the section of Late
-  Safepoint Placement below.
+  The recommended approach is to use the :ref:`utility passes 
+  <statepoint-utilities>` described below. 
 
 This abstract function call is concretely represented by a sequence of
 intrinsic calls known as a 'statepoint sequence'.
@@ -151,15 +151,15 @@ When lowered, this example would generate the following x86 assembly::
 
 Each of the potentially relocated values has been spilled to the
 stack, and a record of that location has been recorded to the
-:ref:`Stack Map section <stackmap-section>`.  If the garbage collector
+:ref: `Stack Map section <stackmap-section>`.  If the garbage collector
 needs to update any of these pointers during the call, it knows
 exactly what to change.
 
 Intrinsics
 ===========
 
-'''gc.statepoint''' Intrinsic
-^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+'llvm.experimental.gc.statepoint' Intrinsic
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
 Syntax:
 """""""
@@ -167,8 +167,9 @@ Syntax:
 ::
 
       declare i32
-        @gc.statepoint(func_type <target>, i64 <#call args>. 
-                       i64 <unused>, ... (call parameters),
+        @llvm.experimental.gc.statepoint(func_type <target>, 
+                       i64 <#call args>. i64 <unused>, 
+                       ... (call parameters),
                        i64 <# deopt args>, ... (deopt parameters),
                        ... (gc parameters))
 
@@ -225,10 +226,10 @@ illegal to mark a statepoint as being either 'readonly' or 'readnone'.
 Note that legal IR can not perform any memory operation on a 'gc
 pointer' argument of the statepoint in a location statically reachable
 from the statepoint.  Instead, the explicitly relocated value (from a
-''gc.relocate'') must be used.
+``gc.relocate``) must be used.
 
-'''gc.result''' Intrinsic
-^^^^^^^^^^^^^^^^^^^^^^^^^^
+'llvm.experimental.gc.result' Intrinsic
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
 Syntax:
 """""""
@@ -236,13 +237,13 @@ Syntax:
 ::
 
       declare type*
-        @gc.result(i32 %statepoint_token)
+        @llvm.experimental.gc.result(i32 %statepoint_token)
 
 Overview:
 """""""""
 
-'''gc.result''' extracts the result of the original call instruction
-which was replaced by the '''gc.statepoint'''.  The '''gc.result'''
+``gc.result`` extracts the result of the original call instruction
+which was replaced by the ``gc.statepoint``.  The ``gc.result``
 intrinsic is actually a family of three intrinsics due to an
 implementation limitation.  Other than the type of the return value,
 the semantics are the same.
@@ -250,47 +251,49 @@ the semantics are the same.
 Operands:
 """""""""
 
-The first and only argument is the '''gc.statepoint''' which starts
-the safepoint sequence of which this '''gc.result'' is a part.
+The first and only argument is the ``gc.statepoint`` which starts
+the safepoint sequence of which this ``gc.result`` is a part.
 Despite the typing of this as a generic i32, *only* the value defined
-by a '''gc.statepoint''' is legal here.
+by a ``gc.statepoint`` is legal here.
 
 Semantics:
 """"""""""
 
-The ''gc.result'' represents the return value of the call target of
-the ''statepoint''.  The type of the ''gc.result'' must exactly match
+The ``gc.result`` represents the return value of the call target of
+the ``statepoint``.  The type of the ``gc.result`` must exactly match
 the type of the target.  If the call target returns void, there will
-be no ''gc.result''.
+be no ``gc.result``.
 
-A ''gc.result'' is modeled as a 'readnone' pure function.  It has no
+A ``gc.result`` is modeled as a 'readnone' pure function.  It has no
 side effects since it is just a projection of the return value of the
-previous call represented by the ''gc.statepoint''.
+previous call represented by the ``gc.statepoint``.
 
-'''gc.relocate''' Intrinsic
-^^^^^^^^^^^^^^^^^^^^^^^^^^^
+'llvm.experimental.gc.relocate' Intrinsic
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
 Syntax:
 """""""
 
 ::
 
-      declare <type> addrspace(1)*
-        @gc.relocate(i32 %statepoint_token, i32 %base_offset, i32 %pointer_offset)
+      declare <pointer type>
+        @llvm.experimental.gc.relocate(i32 %statepoint_token, 
+                                       i32 %base_offset, 
+                                       i32 %pointer_offset)
 
 Overview:
 """""""""
 
-A ''gc.relocate'' returns the potentially relocated value of a pointer
+A ``gc.relocate`` returns the potentially relocated value of a pointer
 at the safepoint.
 
 Operands:
 """""""""
 
-The first argument is the '''gc.statepoint''' which starts the
-safepoint sequence of which this '''gc.relocation'' is a part.
+The first argument is the ``gc.statepoint`` which starts the
+safepoint sequence of which this ``gc.relocation`` is a part.
 Despite the typing of this as a generic i32, *only* the value defined
-by a '''gc.statepoint''' is legal here.
+by a ``gc.statepoint`` is legal here.
 
 The second argument is an index into the statepoints list of arguments
 which specifies the base pointer for the pointer being relocated.
@@ -306,18 +309,18 @@ within the 'gc parameter' section of the statepoint's argument list.
 Semantics:
 """"""""""
 
-The return value of ''gc.relocate'' is the potentially relocated value
+The return value of ``gc.relocate`` is the potentially relocated value
 of the pointer specified by it's arguments.  It is unspecified how the
 value of the returned pointer relates to the argument to the
-''gc.statepoint'' other than that a) it points to the same source
+``gc.statepoint`` other than that a) it points to the same source
 language object with the same offset, and b) the 'based-on'
 relationship of the newly relocated pointers is a projection of the
 unrelocated pointers.  In particular, the integer value of the pointer
 returned is unspecified.
 
-A ''gc.relocate'' is modeled as a 'readnone' pure function.  It has no
+A ``gc.relocate`` is modeled as a ``readnone`` pure function.  It has no
 side effects since it is just a way to extract information about work
-done during the actual call modeled by the ''gc.statepoint''.
+done during the actual call modeled by the ``gc.statepoint``.
 
 
 Stack Map Format
@@ -389,6 +392,93 @@ documentation.  The current implementation in LLVM does not check the
 key relocation invariant, but this is ongoing work on developing such
 a verifier.  Please ask on llvmdev if you're interested in
 experimenting with the current version.
+
+.. _statepoint-utilities:
+
+Utility Passes for Safepoint Insertion
+======================================
+
+.. _RewriteStatepointsForGC:
+
+RewriteStatepointsForGC
+^^^^^^^^^^^^^^^^^^^^^^^^
+
+The pass RewriteStatepointsForGC transforms a functions IR by replacing a 
+``gc.statepoint`` (with an optional ``gc.result``) with a full relocation 
+sequence, including all required ``gc.relocates``.  To function, the pass 
+requires that the GC strategy specified for the function be able to reliably 
+distinguish between GC references and non-GC references in IR it is given.
+
+As an example, given this code:
+
+.. code-block:: llvm
+
+  define i8 addrspace(1)* @test1(i8 addrspace(1)* %obj) 
+         gc "statepoint-example" {
+    call i32 (void ()*, i32, i32, ...)* @llvm.experimental.gc.statepoint.p0f_isVoidf(void ()* @foo, i32 0, i32 0, i32 5, i32 0, i32 -1, i32 0, i32 0, i32 0)
+    ret i8 addrspace(1)* %obj
+  }
+
+The pass would produce this IR:
+
+.. code-block:: llvm
+
+  define i8 addrspace(1)* @test1(i8 addrspace(1)* %obj) 
+         gc "statepoint-example" {
+    %0 = call i32 (void ()*, i32, i32, ...)* @llvm.experimental.gc.statepoint.p0f_isVoidf(void ()* @foo, i32 0, i32 0, i32 5, i32 0, i32 -1, i32 0, i32 0, i32 0, i8 addrspace(1)* %obj)
+    %obj.relocated = call coldcc i8 addrspace(1)* @llvm.experimental.gc.relocate.p1i8(i32 %0, i32 9, i32 9)
+    ret i8 addrspace(1)* %obj.relocated
+  }
+
+In the above examples, the addrspace(1) marker on the pointers is the mechanism
+that the ``statepoint-example`` GC strategy uses to distinguish references from
+non references.  Address space 1 is not globally reserved for this purpose.
+
+This pass can be used an utility function by a language frontend that doesn't 
+want to manually reason about liveness, base pointers, or relocation when 
+constructing IR.  As currently implemented, RewriteStatepointsForGC must be 
+run after SSA construction (i.e. mem2ref).  
+
+
+In practice, RewriteStatepointsForGC can be run much later in the pass 
+pipeline, after most optimization is already done.  This helps to improve 
+the quality of the generated code when compiled with garbage collection support.
+In the long run, this is the intended usage model.  At this time, a few details
+have yet to be worked out about the semantic model required to guarantee this 
+is always correct.  As such, please use with caution and report bugs.
+
+.. _PlaceSafepoints:
+
+PlaceSafepoints
+^^^^^^^^^^^^^^^^
+
+The pass PlaceSafepoints transforms a function's IR by replacing any call or 
+invoke instructions with appropriate ``gc.statepoint`` and ``gc.result`` pairs,
+and inserting safepoint polls sufficient to ensure running code checks for a 
+safepoint request on a timely manner.  This pass is expected to be run before 
+RewriteStatepointsForGC and thus does not produce full relocation sequences.  
+
+At the moment, PlaceSafepoints can insert safepoint polls at method entry and 
+loop backedges locations.  Extending this to work with return polls would be 
+straight forward if desired.
+
+PlaceSafepoints includes a number of optimizations to avoid placing safepoint 
+polls at particular sites unless needed to ensure timely execution of a poll 
+under normal conditions.  PlaceSafepoints does not attempt to ensure timely 
+execution of a poll under worst case conditions such as heavy system paging.
+
+The implementation of a safepoint poll action is specified by looking up a 
+function of the name ``gc.safepoint_poll`` in the containing Module.  The body
+of this function is inserted at each poll site desired.  While calls or invokes
+inside this method are transformed to a ``gc.statepoints``, recursive poll 
+insertion is not performed.
+
+If you are scheduling the RewriteStatepointsForGC pass late in the pass order,
+you should probably schedule this pass immediately before it.  The exception 
+would be if you need to preserve abstract frame information (e.g. for
+deoptimization or introspection) at safepoints.  In that case, ask on the 
+llvmdev mailing list for suggestions.
+
 
 Bugs and Enhancements
 =====================
