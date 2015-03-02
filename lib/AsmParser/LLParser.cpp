@@ -2270,13 +2270,13 @@ bool LLParser::PerFunctionState::SetInstName(int NameID,
 /// forward reference record if needed.
 BasicBlock *LLParser::PerFunctionState::GetBB(const std::string &Name,
                                               LocTy Loc) {
-  return cast_or_null<BasicBlock>(GetVal(Name,
-                                        Type::getLabelTy(F.getContext()), Loc));
+  return dyn_cast_or_null<BasicBlock>(GetVal(Name,
+                                      Type::getLabelTy(F.getContext()), Loc));
 }
 
 BasicBlock *LLParser::PerFunctionState::GetBB(unsigned ID, LocTy Loc) {
-  return cast_or_null<BasicBlock>(GetVal(ID,
-                                        Type::getLabelTy(F.getContext()), Loc));
+  return dyn_cast_or_null<BasicBlock>(GetVal(ID,
+                                      Type::getLabelTy(F.getContext()), Loc));
 }
 
 /// DefineBB - Define the specified basic block, which is either named or
@@ -2976,6 +2976,8 @@ struct ColumnField : public MDUnsignedField {
 };
 struct DwarfTagField : public MDUnsignedField {
   DwarfTagField() : MDUnsignedField(0, dwarf::DW_TAG_hi_user) {}
+  DwarfTagField(dwarf::Tag DefaultTag)
+      : MDUnsignedField(DefaultTag, dwarf::DW_TAG_hi_user) {}
 };
 struct DwarfAttEncodingField : public MDUnsignedField {
   DwarfAttEncodingField() : MDUnsignedField(0, dwarf::DW_ATE_hi_user) {}
@@ -3373,7 +3375,7 @@ bool LLParser::ParseMDEnumerator(MDNode *&Result, bool IsDistinct) {
 ///   ::= !MDBasicType(tag: DW_TAG_base_type, name: "int", size: 32, align: 32)
 bool LLParser::ParseMDBasicType(MDNode *&Result, bool IsDistinct) {
 #define VISIT_MD_FIELDS(OPTIONAL, REQUIRED)                                    \
-  REQUIRED(tag, DwarfTagField, );                                              \
+  OPTIONAL(tag, DwarfTagField, (dwarf::DW_TAG_base_type));                     \
   OPTIONAL(name, MDStringField, );                                             \
   OPTIONAL(size, MDUnsignedField, (0, UINT64_MAX));                            \
   OPTIONAL(align, MDUnsignedField, (0, UINT64_MAX));                           \
@@ -3604,9 +3606,9 @@ bool LLParser::ParseMDTemplateTypeParameter(MDNode *&Result, bool IsDistinct) {
 ///                                 name: "V", type: !1, value: i32 7)
 bool LLParser::ParseMDTemplateValueParameter(MDNode *&Result, bool IsDistinct) {
 #define VISIT_MD_FIELDS(OPTIONAL, REQUIRED)                                    \
-  REQUIRED(tag, DwarfTagField, );                                              \
+  OPTIONAL(tag, DwarfTagField, (dwarf::DW_TAG_template_value_parameter));      \
   OPTIONAL(name, MDStringField, );                                             \
-  REQUIRED(type, MDField, );                                                   \
+  OPTIONAL(type, MDField, );                                                   \
   REQUIRED(value, MDField, );
   PARSE_MD_FIELDS();
 #undef VISIT_MD_FIELDS
@@ -4297,7 +4299,9 @@ bool LLParser::ParseBasicBlock(PerFunctionState &PFS) {
   }
 
   BasicBlock *BB = PFS.DefineBB(Name, NameLoc);
-  if (!BB) return true;
+  if (!BB)
+    return Error(NameLoc,
+                 "unable to create block named '" + Name + "'");
 
   std::string NameStr;
 
@@ -5241,7 +5245,11 @@ int LLParser::ParseLoad(Instruction *&Inst, PerFunctionState &PFS) {
     Lex.Lex();
   }
 
-  if (ParseTypeAndValue(Val, Loc, PFS) ||
+  Type *Ty = nullptr;
+  LocTy ExplicitTypeLoc = Lex.getLoc();
+  if (ParseType(Ty) ||
+      ParseToken(lltok::comma, "expected comma after load's type") ||
+      ParseTypeAndValue(Val, Loc, PFS) ||
       ParseScopeAndOrdering(isAtomic, Scope, Ordering) ||
       ParseOptionalCommaAlign(Alignment, AteExtraComma))
     return true;
@@ -5253,6 +5261,10 @@ int LLParser::ParseLoad(Instruction *&Inst, PerFunctionState &PFS) {
     return Error(Loc, "atomic load must have explicit non-zero alignment");
   if (Ordering == Release || Ordering == AcquireRelease)
     return Error(Loc, "atomic load cannot use Release ordering");
+
+  if (Ty != cast<PointerType>(Val->getType())->getElementType())
+    return Error(ExplicitTypeLoc,
+                 "explicit pointee type doesn't match operand's pointee type");
 
   Inst = new LoadInst(Val, "", isVolatile, Alignment, Ordering, Scope);
   return AteExtraComma ? InstExtraComma : InstNormal;
@@ -5440,7 +5452,21 @@ int LLParser::ParseGetElementPtr(Instruction *&Inst, PerFunctionState &PFS) {
 
   bool InBounds = EatIfPresent(lltok::kw_inbounds);
 
-  if (ParseTypeAndValue(Ptr, Loc, PFS)) return true;
+  Type *Ty = nullptr;
+  LocTy ExplicitTypeLoc = Lex.getLoc();
+  if (ParseType(Ty) ||
+      ParseToken(lltok::comma, "expected comma after getelementptr's type") ||
+      ParseTypeAndValue(Ptr, Loc, PFS))
+    return true;
+
+  Type *PtrTy = Ptr->getType();
+  if (!isa<SequentialType>(PtrTy))
+    return Error(Loc, "pointer type is not valid");
+  if (VectorType *VT = dyn_cast<VectorType>(PtrTy))
+    PtrTy = VT->getElementType();
+  if (Ty != cast<SequentialType>(PtrTy)->getElementType())
+    return Error(ExplicitTypeLoc,
+                 "explicit pointee type doesn't match operand's pointee type");
 
   Type *BaseType = Ptr->getType();
   PointerType *BasePointerType = dyn_cast<PointerType>(BaseType->getScalarType());

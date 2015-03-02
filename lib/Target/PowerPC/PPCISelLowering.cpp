@@ -880,7 +880,7 @@ PPCTargetLowering::PPCTargetLowering(const PPCTargetMachine &TM,
   else
     setSchedulingPreference(Sched::Hybrid);
 
-  computeRegisterProperties();
+  computeRegisterProperties(STI.getRegisterInfo());
 
   // The Freescale cores do better with aggressive inlining of memcpy and
   // friends. GCC uses same threshold of 128 bytes (= 32 word stores).
@@ -892,6 +892,13 @@ PPCTargetLowering::PPCTargetLowering(const PPCTargetMachine &TM,
     MaxStoresPerMemcpyOptSize = 8;
     MaxStoresPerMemmove = 32;
     MaxStoresPerMemmoveOptSize = 8;
+  } else if (Subtarget.getDarwinDirective() == PPC::DIR_A2) {
+    // The A2 also benefits from (very) aggressive inlining of memcpy and
+    // friends. The overhead of a the function call, even when warm, can be
+    // over one hundred cycles.
+    MaxStoresPerMemset = 128;
+    MaxStoresPerMemcpy = 128;
+    MaxStoresPerMemmove = 128;
   }
 }
 
@@ -991,9 +998,6 @@ const char *PPCTargetLowering::getTargetNodeName(unsigned Opcode) const {
   case PPCISD::TC_RETURN:       return "PPCISD::TC_RETURN";
   case PPCISD::CR6SET:          return "PPCISD::CR6SET";
   case PPCISD::CR6UNSET:        return "PPCISD::CR6UNSET";
-  case PPCISD::ADDIS_TOC_HA:    return "PPCISD::ADDIS_TOC_HA";
-  case PPCISD::LD_TOC_L:        return "PPCISD::LD_TOC_L";
-  case PPCISD::ADDI_TOC_L:      return "PPCISD::ADDI_TOC_L";
   case PPCISD::PPC32_GOT:       return "PPCISD::PPC32_GOT";
   case PPCISD::ADDIS_GOT_TPREL_HA: return "PPCISD::ADDIS_GOT_TPREL_HA";
   case PPCISD::LD_GOT_TPREL_L:  return "PPCISD::LD_GOT_TPREL_L";
@@ -1824,6 +1828,19 @@ static void setUsesTOCBasePtr(SelectionDAG &DAG) {
   setUsesTOCBasePtr(DAG.getMachineFunction());
 }
 
+static SDValue getTOCEntry(SelectionDAG &DAG, SDLoc dl, bool Is64Bit,
+                           SDValue GA) {
+  EVT VT = Is64Bit ? MVT::i64 : MVT::i32;
+  SDValue Reg = Is64Bit ? DAG.getRegister(PPC::X2, VT) :
+                DAG.getNode(PPCISD::GlobalBaseReg, dl, VT);
+
+  SDValue Ops[] = { GA, Reg };
+  return DAG.getMemIntrinsicNode(PPCISD::TOC_ENTRY, dl,
+                                 DAG.getVTList(VT, MVT::Other), Ops, VT,
+                                 MachinePointerInfo::getGOT(), 0, false, true,
+                                 false, 0);
+}
+
 SDValue PPCTargetLowering::LowerConstantPool(SDValue Op,
                                              SelectionDAG &DAG) const {
   EVT PtrVT = Op.getValueType();
@@ -1835,8 +1852,7 @@ SDValue PPCTargetLowering::LowerConstantPool(SDValue Op,
   if (Subtarget.isSVR4ABI() && Subtarget.isPPC64()) {
     setUsesTOCBasePtr(DAG);
     SDValue GA = DAG.getTargetConstantPool(C, PtrVT, CP->getAlignment(), 0);
-    return DAG.getNode(PPCISD::TOC_ENTRY, SDLoc(CP), MVT::i64, GA,
-                       DAG.getRegister(PPC::X2, MVT::i64));
+    return getTOCEntry(DAG, SDLoc(CP), true, GA);
   }
 
   unsigned MOHiFlag, MOLoFlag;
@@ -1846,9 +1862,7 @@ SDValue PPCTargetLowering::LowerConstantPool(SDValue Op,
   if (isPIC && Subtarget.isSVR4ABI()) {
     SDValue GA = DAG.getTargetConstantPool(C, PtrVT, CP->getAlignment(),
                                            PPCII::MO_PIC_FLAG);
-    SDLoc DL(CP);
-    return DAG.getNode(PPCISD::TOC_ENTRY, DL, MVT::i32, GA,
-                       DAG.getNode(PPCISD::GlobalBaseReg, DL, PtrVT));
+    return getTOCEntry(DAG, SDLoc(CP), false, GA);
   }
 
   SDValue CPIHi =
@@ -1867,8 +1881,7 @@ SDValue PPCTargetLowering::LowerJumpTable(SDValue Op, SelectionDAG &DAG) const {
   if (Subtarget.isSVR4ABI() && Subtarget.isPPC64()) {
     setUsesTOCBasePtr(DAG);
     SDValue GA = DAG.getTargetJumpTable(JT->getIndex(), PtrVT);
-    return DAG.getNode(PPCISD::TOC_ENTRY, SDLoc(JT), MVT::i64, GA,
-                       DAG.getRegister(PPC::X2, MVT::i64));
+    return getTOCEntry(DAG, SDLoc(JT), true, GA);
   }
 
   unsigned MOHiFlag, MOLoFlag;
@@ -1878,9 +1891,7 @@ SDValue PPCTargetLowering::LowerJumpTable(SDValue Op, SelectionDAG &DAG) const {
   if (isPIC && Subtarget.isSVR4ABI()) {
     SDValue GA = DAG.getTargetJumpTable(JT->getIndex(), PtrVT,
                                         PPCII::MO_PIC_FLAG);
-    SDLoc DL(GA);
-    return DAG.getNode(PPCISD::TOC_ENTRY, SDLoc(JT), PtrVT, GA,
-                       DAG.getNode(PPCISD::GlobalBaseReg, DL, PtrVT));
+    return getTOCEntry(DAG, SDLoc(GA), false, GA);
   }
 
   SDValue JTIHi = DAG.getTargetJumpTable(JT->getIndex(), PtrVT, MOHiFlag);
@@ -1899,8 +1910,7 @@ SDValue PPCTargetLowering::LowerBlockAddress(SDValue Op,
   if (Subtarget.isSVR4ABI() && Subtarget.isPPC64()) {
     setUsesTOCBasePtr(DAG);
     SDValue GA = DAG.getTargetBlockAddress(BA, PtrVT, BASDN->getOffset());
-    return DAG.getNode(PPCISD::TOC_ENTRY, SDLoc(BASDN), MVT::i64, GA,
-                       DAG.getRegister(PPC::X2, MVT::i64));
+    return getTOCEntry(DAG, SDLoc(BASDN), true, GA);
   }
 
   unsigned MOHiFlag, MOLoFlag;
@@ -2010,8 +2020,7 @@ SDValue PPCTargetLowering::LowerGlobalAddress(SDValue Op,
   if (Subtarget.isSVR4ABI() && Subtarget.isPPC64()) {
     setUsesTOCBasePtr(DAG);
     SDValue GA = DAG.getTargetGlobalAddress(GV, DL, PtrVT, GSDN->getOffset());
-    return DAG.getNode(PPCISD::TOC_ENTRY, DL, MVT::i64, GA,
-                       DAG.getRegister(PPC::X2, MVT::i64));
+    return getTOCEntry(DAG, DL, true, GA);
   }
 
   unsigned MOHiFlag, MOLoFlag;
@@ -2022,8 +2031,7 @@ SDValue PPCTargetLowering::LowerGlobalAddress(SDValue Op,
     SDValue GA = DAG.getTargetGlobalAddress(GV, DL, PtrVT,
                                             GSDN->getOffset(),
                                             PPCII::MO_PIC_FLAG);
-    return DAG.getNode(PPCISD::TOC_ENTRY, DL, MVT::i32, GA,
-                       DAG.getNode(PPCISD::GlobalBaseReg, DL, MVT::i32));
+    return getTOCEntry(DAG, DL, false, GA);
   }
 
   SDValue GAHi =
@@ -2435,27 +2443,16 @@ bool llvm::CC_PPC32_SVR4_Custom_AlignFPArgRegs(unsigned &ValNo, MVT &ValVT,
   return false;
 }
 
-/// GetFPR - Get the set of FP registers that should be allocated for arguments,
+/// FPR - The set of FP registers that should be allocated for arguments,
 /// on Darwin.
-static const MCPhysReg *GetFPR() {
-  static const MCPhysReg FPR[] = {
-    PPC::F1, PPC::F2, PPC::F3, PPC::F4, PPC::F5, PPC::F6, PPC::F7,
-    PPC::F8, PPC::F9, PPC::F10, PPC::F11, PPC::F12, PPC::F13
-  };
+static const MCPhysReg FPR[] = {PPC::F1,  PPC::F2,  PPC::F3, PPC::F4, PPC::F5,
+                                PPC::F6,  PPC::F7,  PPC::F8, PPC::F9, PPC::F10,
+                                PPC::F11, PPC::F12, PPC::F13};
 
-  return FPR;
-}
-
-/// GetQFPR - Get the set of QPX registers that should be allocated for
-/// arguments.
-static const MCPhysReg *GetQFPR() {
-  static const MCPhysReg QFPR[] = {
-    PPC::QF1, PPC::QF2, PPC::QF3, PPC::QF4, PPC::QF5, PPC::QF6, PPC::QF7,
-    PPC::QF8, PPC::QF9, PPC::QF10, PPC::QF11, PPC::QF12, PPC::QF13
-  };
-
-  return QFPR;
-}
+/// QFPR - The set of QPX registers that should be allocated for arguments.
+static const MCPhysReg QFPR[] = {
+    PPC::QF1, PPC::QF2, PPC::QF3,  PPC::QF4,  PPC::QF5,  PPC::QF6, PPC::QF7,
+    PPC::QF8, PPC::QF9, PPC::QF10, PPC::QF11, PPC::QF12, PPC::QF13};
 
 /// CalculateStackSlotSize - Calculates the size reserved for this argument on
 /// the stack.
@@ -2879,9 +2876,6 @@ PPCTargetLowering::LowerFormalArguments_64SVR4(
     PPC::X3, PPC::X4, PPC::X5, PPC::X6,
     PPC::X7, PPC::X8, PPC::X9, PPC::X10,
   };
-
-  static const MCPhysReg *FPR = GetFPR();
-
   static const MCPhysReg VR[] = {
     PPC::V2, PPC::V3, PPC::V4, PPC::V5, PPC::V6, PPC::V7, PPC::V8,
     PPC::V9, PPC::V10, PPC::V11, PPC::V12, PPC::V13
@@ -2890,8 +2884,6 @@ PPCTargetLowering::LowerFormalArguments_64SVR4(
     PPC::VSH2, PPC::VSH3, PPC::VSH4, PPC::VSH5, PPC::VSH6, PPC::VSH7, PPC::VSH8,
     PPC::VSH9, PPC::VSH10, PPC::VSH11, PPC::VSH12, PPC::VSH13
   };
-
-  static const MCPhysReg *QFPR = GetQFPR();
 
   const unsigned Num_GPR_Regs = array_lengthof(GPR);
   const unsigned Num_FPR_Regs = 13;
@@ -3290,9 +3282,6 @@ PPCTargetLowering::LowerFormalArguments_Darwin(
     PPC::X3, PPC::X4, PPC::X5, PPC::X6,
     PPC::X7, PPC::X8, PPC::X9, PPC::X10,
   };
-
-  static const MCPhysReg *FPR = GetFPR();
-
   static const MCPhysReg VR[] = {
     PPC::V2, PPC::V3, PPC::V4, PPC::V5, PPC::V6, PPC::V7, PPC::V8,
     PPC::V9, PPC::V10, PPC::V11, PPC::V12, PPC::V13
@@ -4581,8 +4570,6 @@ PPCTargetLowering::LowerCall_64SVR4(SDValue Chain, SDValue Callee,
     PPC::X3, PPC::X4, PPC::X5, PPC::X6,
     PPC::X7, PPC::X8, PPC::X9, PPC::X10,
   };
-  static const MCPhysReg *FPR = GetFPR();
-
   static const MCPhysReg VR[] = {
     PPC::V2, PPC::V3, PPC::V4, PPC::V5, PPC::V6, PPC::V7, PPC::V8,
     PPC::V9, PPC::V10, PPC::V11, PPC::V12, PPC::V13
@@ -4591,8 +4578,6 @@ PPCTargetLowering::LowerCall_64SVR4(SDValue Chain, SDValue Callee,
     PPC::VSH2, PPC::VSH3, PPC::VSH4, PPC::VSH5, PPC::VSH6, PPC::VSH7, PPC::VSH8,
     PPC::VSH9, PPC::VSH10, PPC::VSH11, PPC::VSH12, PPC::VSH13
   };
-
-  static const MCPhysReg *QFPR = GetQFPR();
 
   const unsigned NumGPRs = array_lengthof(GPR);
   const unsigned NumFPRs = 13;
@@ -5075,7 +5060,7 @@ PPCTargetLowering::LowerCall_64SVR4(SDValue Chain, SDValue Callee,
           RegsToPass.push_back(std::make_pair(QFPR[QFPR_idx++], Load));
         }
         ArgOffset += (IsF32 ? 16 : 32);
-        for (unsigned i=0; i<(IsF32 ? 16 : 32); i+=PtrByteSize) {
+        for (unsigned i = 0; i < (IsF32 ? 16U : 32U); i += PtrByteSize) {
           if (GPR_idx == NumGPRs)
             break;
           SDValue Ix = DAG.getNode(ISD::ADD, dl, PtrVT, PtrOff,
@@ -5279,8 +5264,6 @@ PPCTargetLowering::LowerCall_Darwin(SDValue Chain, SDValue Callee,
     PPC::X3, PPC::X4, PPC::X5, PPC::X6,
     PPC::X7, PPC::X8, PPC::X9, PPC::X10,
   };
-  static const MCPhysReg *FPR = GetFPR();
-
   static const MCPhysReg VR[] = {
     PPC::V2, PPC::V3, PPC::V4, PPC::V5, PPC::V6, PPC::V7, PPC::V8,
     PPC::V9, PPC::V10, PPC::V11, PPC::V12, PPC::V13
@@ -6417,7 +6400,7 @@ static SDValue BuildSplatI(int Val, unsigned SplatSize, EVT VT,
                              SelectionDAG &DAG, SDLoc dl) {
   assert(Val >= -16 && Val <= 15 && "vsplti is out of range!");
 
-  static const EVT VTys[] = { // canonical VT to use for each size.
+  static const MVT VTys[] = { // canonical VT to use for each size.
     MVT::v16i8, MVT::v8i16, MVT::Other, MVT::v4i32
   };
 
@@ -9987,7 +9970,7 @@ SDValue PPCTargetLowering::PerformDAGCombine(SDNode *N,
                 isa<ConstantSDNode>(UI->getOperand(1)) &&
                 (cast<ConstantSDNode>(Add->getOperand(1))->getZExtValue() -
                  cast<ConstantSDNode>(UI->getOperand(1))->getZExtValue()) %
-                (1 << Bits) == 0) {
+                (1ULL << Bits) == 0) {
               SDNode *OtherAdd = *UI;
               for (SDNode::use_iterator VI = OtherAdd->use_begin(),
                    VE = OtherAdd->use_end(); VI != VE; ++VI) {
@@ -10430,8 +10413,9 @@ PPCTargetLowering::getSingleConstraintMatchWeight(
   return weight;
 }
 
-std::pair<unsigned, const TargetRegisterClass*>
-PPCTargetLowering::getRegForInlineAsmConstraint(const std::string &Constraint,
+std::pair<unsigned, const TargetRegisterClass *>
+PPCTargetLowering::getRegForInlineAsmConstraint(const TargetRegisterInfo *TRI,
+                                                const std::string &Constraint,
                                                 MVT VT) const {
   if (Constraint.size() == 1) {
     // GCC RS6000 Constraint Letters
@@ -10472,8 +10456,8 @@ PPCTargetLowering::getRegForInlineAsmConstraint(const std::string &Constraint,
     return std::make_pair(0U, &PPC::VSFRCRegClass);
   }
 
-  std::pair<unsigned, const TargetRegisterClass*> R =
-    TargetLowering::getRegForInlineAsmConstraint(Constraint, VT);
+  std::pair<unsigned, const TargetRegisterClass *> R =
+      TargetLowering::getRegForInlineAsmConstraint(TRI, Constraint, VT);
 
   // r[0-9]+ are used, on PPC64, to refer to the corresponding 64-bit registers
   // (which we call X[0-9]+). If a 64-bit value has been requested, and a
@@ -10482,12 +10466,10 @@ PPCTargetLowering::getRegForInlineAsmConstraint(const std::string &Constraint,
   // FIXME: If TargetLowering::getRegForInlineAsmConstraint could somehow use
   // the AsmName field from *RegisterInfo.td, then this would not be necessary.
   if (R.first && VT == MVT::i64 && Subtarget.isPPC64() &&
-      PPC::GPRCRegClass.contains(R.first)) {
-    const TargetRegisterInfo *TRI = Subtarget.getRegisterInfo();
+      PPC::GPRCRegClass.contains(R.first))
     return std::make_pair(TRI->getMatchingSuperReg(R.first,
                             PPC::sub_32, &PPC::G8RCRegClass),
                           &PPC::G8RCRegClass);
-  }
 
   // GCC accepts 'cc' as an alias for 'cr0', and we need to do the same.
   if (!R.second && StringRef("{cc}").equals_lower(Constraint)) {
@@ -10914,11 +10896,27 @@ EVT PPCTargetLowering::getOptimalMemOpType(uint64_t Size,
                                            bool IsMemset, bool ZeroMemset,
                                            bool MemcpyStrSrc,
                                            MachineFunction &MF) const {
+  const Function *F = MF.getFunction();
+  // When expanding a memset, require at least two QPX instructions to cover
+  // the cost of loading the value to be stored from the constant pool.
+  if (Subtarget.hasQPX() && Size >= 32 && (!IsMemset || Size >= 64) &&
+     (!SrcAlign || SrcAlign >= 32) && (!DstAlign || DstAlign >= 32) &&
+      !F->hasFnAttribute(Attribute::NoImplicitFloat)) {
+    return MVT::v4f64;
+  }
+
+  // We should use Altivec/VSX loads and stores when available. For unaligned
+  // addresses, unaligned VSX loads are only fast starting with the P8.
+  if (Subtarget.hasAltivec() && Size >= 16 &&
+      (((!SrcAlign || SrcAlign >= 16) && (!DstAlign || DstAlign >= 16)) ||
+       ((IsMemset && Subtarget.hasVSX()) || Subtarget.hasP8Vector())))
+    return MVT::v4i32;
+
   if (Subtarget.isPPC64()) {
     return MVT::i64;
-  } else {
-    return MVT::i32;
   }
+
+  return MVT::i32;
 }
 
 /// \brief Returns true if it is beneficial to convert a load of a constant
