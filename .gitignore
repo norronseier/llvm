@@ -18,8 +18,10 @@
 # vim swap files
 .*.sw?
 .sw?
-#OS X specific files.
+# OS X specific files.
 .DS_store
+# CodeBlocks
+*.save
 
 #==============================================================================#
 # Explicit files to ignore (only matches one).

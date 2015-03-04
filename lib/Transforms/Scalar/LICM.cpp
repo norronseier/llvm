@@ -91,8 +91,6 @@ static bool canSinkOrHoistInst(Instruction &I, AliasAnalysis *AA,
                                DominatorTree *DT, const DataLayout *DL,
                                Loop *CurLoop, AliasSetTracker *CurAST,
                                LICMSafetyInfo * SafetyInfo);
-// Temporary
-static bool isLoopInvariantWrtGivenLoop(Loop *L, Instruction* I, LoopInfo* LI);
 
 namespace {
   struct LICM : public LoopPass {
@@ -152,6 +150,11 @@ namespace {
 
     /// Simple Analysis hook. Delete loop L from alias set map.
     void deleteAnalysisLoop(Loop *L) override;
+
+    /// Generalized LICM.
+    bool generalizedHoist(DomTreeNode *N, LICMSafetyInfo *SafetyInfo);
+
+    bool isInvariantForGivenLoop(Instruction *I, Loop *L);
   };
 }
 
@@ -177,11 +180,6 @@ bool LICM::runOnLoop(Loop *L, LPPassManager &LPM) {
     return false;
 
   Changed = false;
-
-  dbgs() << "Currently running LICM on the following loop: \n";
-  dbgs() << "===========================\n";
-  dbgs() << *L;
-  dbgs() << "===========================\n";
 
   // Get our Loop and Alias Analysis information...
   LI = &getAnalysis<LoopInfoWrapperPass>().getLoopInfo();
@@ -241,12 +239,14 @@ bool LICM::runOnLoop(Loop *L, LPPassManager &LPM) {
   // us to sink instructions in one pass, without iteration.  After sinking
   // instructions, we perform another pass to hoist them out of the loop.
   //
+  dbgs() << "Inspecting Loop: " << *CurLoop << "\n";
   if (L->hasDedicatedExits())
     Changed |= sinkRegion(DT->getNode(L->getHeader()), AA, LI, DT, DL, TLI,
                           CurLoop, CurAST, &SafetyInfo);
   if (Preheader)
     Changed |= hoistRegion(DT->getNode(L->getHeader()), AA, LI, DT, DL, TLI,
                            CurLoop, CurAST, &SafetyInfo);
+  Changed |= generalizedHoist(DT->getNode(L->getHeader()), &SafetyInfo);
 
   // Now that all loop invariants have been removed from the loop, promote any
   // memory references to scalars that we can.
@@ -362,7 +362,7 @@ bool llvm::hoistRegion(DomTreeNode *N, AliasAnalysis *AA, LoopInfo *LI,
                        TargetLibraryInfo *TLI, Loop *CurLoop,
                        AliasSetTracker *CurAST, LICMSafetyInfo *SafetyInfo) {
   // Verify inputs.
-  assert(N != nullptr && AA != nullptr && LI != nullptr &&
+  assert(N != nullptr && AA != nullptwr && LI != nullptr &&
          DT != nullptr && CurLoop != nullptr && CurAST != nullptr &&
          SafetyInfo != nullptr && "Unexpected input to hoistRegion");
   // Set changed as false.
@@ -376,9 +376,6 @@ bool llvm::hoistRegion(DomTreeNode *N, AliasAnalysis *AA, LoopInfo *LI,
   if (!inSubLoop(BB, CurLoop, LI))
     for (BasicBlock::iterator II = BB->begin(), E = BB->end(); II != E; ) {
       Instruction &I = *II++;
-      dbgs() << "------------------\n";
-      dbgs() << "Inspecting instruction " << I << "\n";
-      dbgs() << "------------------\n";
       // Try constant folding this instruction.  If all the operands are
       // constants, it is technically hoistable, but it would be better to just
       // fold it.
@@ -394,33 +391,11 @@ bool llvm::hoistRegion(DomTreeNode *N, AliasAnalysis *AA, LoopInfo *LI,
       // Try hoisting the instruction out to the preheader.  We can only do this
       // if all of the operands of the instruction are loop invariant and if it
       // is safe to hoist the instruction.
-      Loop *CurrentLoop = CurLoop;
-      bool hoisted = false;
-      do {
-        dbgs() << "CurrentLoop is: " << *CurrentLoop << "\n";
-        bool hasLoopinvariantOperands = CurrentLoop->hasLoopInvariantOperands(&I);
-        bool canSinkOrHoist = canSinkOrHoistInst(I, AA, DT, DL, CurrentLoop,
-                                                 CurAST, SafetyInfo);
-        bool isSafeToExecute = isSafeToExecuteUnconditionally(I, DT, DL,
-                                                              CurrentLoop,
-                                                              SafetyInfo);
-        dbgs() << "Loop invariant (classical way) = " << hasLoopinvariantOperands << "\n";
-        dbgs() << "Can sink/hoist = " << canSinkOrHoist << "\n";
-        dbgs() << "Safe to exec = " << isSafeToExecute << "\n";
-        hoisted = hasLoopinvariantOperands && canSinkOrHoist && isSafeToExecute;
-        if (hoisted) {
-            if (CurrentLoop == CurLoop)
-              Changed |= hoist(I, CurrentLoop->getLoopPreheader());
-            else
-              dbgs() << "Instruction " << I << " could be hoisted in the\
-                        preheader of the following loop: " << *CurrentLoop << '\n';
-        }
-        else {
-          hasLoopinvariantOperands = isLoopInvariantWrtGivenLoop(CurrentLoop, &I, LI);
-          dbgs() << "Loop invariant (current loop only) = " << hasLoopinvariantOperands << "\n";
-          CurrentLoop = CurrentLoop->getParentLoop();
-        }
-      } while (!hoisted && CurrentLoop != NULL);
+      //
+      if (CurLoop->hasLoopInvariantOperands(&I) &&
+          canSinkOrHoistInst(I, AA, DT, DL, CurLoop, CurAST, SafetyInfo) &&
+          isSafeToExecuteUnconditionally(I, DT, DL, CurLoop, SafetyInfo))
+        Changed |= hoist(I, CurLoop->getLoopPreheader());
     }
 
   const std::vector<DomTreeNode*> &Children = N->getChildren();
@@ -430,16 +405,45 @@ bool llvm::hoistRegion(DomTreeNode *N, AliasAnalysis *AA, LoopInfo *LI,
   return Changed;
 }
 
-// [Experimental]
-/// Checks whether an instruction is invariant with respect to the given loop
-/// only, without taking subloops into account.
-static bool isLoopInvariantWrtGivenLoop(Loop* L, Instruction* I, LoopInfo *LI) {
-  for (unsigned i = 0, e = I->getNumOperands(); i != e; ++i) {
-    if (Instruction *OpI = dyn_cast<Instruction>(I->getOperand(i))) {
-      if (LI->getLoopFor(OpI->getParent()) == L) {
-        return false;
-      }
+/// Generalized LICM.
+bool LICM::generalizedHoist(DomTreeNode *N, LICMSafetyInfo *SafetyInfo) {
+  bool Changed = false;
+  Loop *ParentLoop = CurLoop->getParentLoop();
+  if (!ParentLoop)
+    return Changed;
+  BasicBlock *ParentPreheader = ParentLoop->getLoopPreheader();
+  if (!ParentPreheader)
+    return Changed;
+
+  dbgs() << "[generalizedHoist] Parent loop exists and has a valid preheader block\n";
+
+  BasicBlock *BB = N->getBlock();
+  if (!CurLoop->contains(BB)) return Changed;
+  if (!inSubLoop(BB, CurLoop, LI)) {
+    dbgs() << "[generalizedHoist] Inspecting BB: " << *BB << "\n";
+    for (BasicBlock::iterator II = BB->begin(), E = BB->end(); II != E;) {
+      Instruction &I = *II++;
+      dbgs() << "[generalizedHoist] Inspecting instruction: " << I << " ";
+      bool parentLoopInv = isInvariantForGivenLoop(&I, ParentLoop);
+      bool canSinkOrHoistInparentLoop = canSinkOrHoistInst(I, AA, DT, DL, ParentLoop, CurAST, SafetyInfo);
+      bool safeToExecute = isSafeToExecuteUnconditionally(I, DT, DL, ParentLoop, SafetyInfo);
+      dbgs() << "invariant w.r.t parent loop = " << parentLoopInv << " "
+             << "can hoist = " << canSinkOrHoistInparentLoop << " "
+             << "safe to exec = " << safeToExecute << "\n";
     }
+  }
+
+  const std::vector<DomTreeNode*> &Children = N->getChildren();
+  for (unsigned i = 0, e = Children.size(); i != e; ++i)
+    Changed |= generalizedHoist(Children[i], SafetyInfo);
+  return Changed;
+}
+
+bool LICM::isInvariantForGivenLoop(Instruction *I, Loop *L) {
+  for (unsigned i = 0, e = I->getNumOperands(); i != e; ++i) {
+    if (Instruction *OpInstr = dyn_cast<Instruction>(I->getOperand(i)))
+      if (LI->getLoopFor(OpInstr->getParent()) == L)
+        return false;
   }
   return true;
 }
