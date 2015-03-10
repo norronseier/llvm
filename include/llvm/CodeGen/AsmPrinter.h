@@ -29,6 +29,8 @@ class ByteStreamer;
 class GCStrategy;
 class Constant;
 class ConstantArray;
+class DIE;
+class DIEAbbrev;
 class GCMetadataPrinter;
 class GlobalValue;
 class GlobalVariable;
@@ -434,29 +436,6 @@ public:
   /// Get the value for DW_AT_APPLE_isa. Zero if no isa encoding specified.
   virtual unsigned getISAEncoding(const Function *) { return 0; }
 
-  /// Emit a dwarf register operation for describing
-  /// - a small value occupying only part of a register or
-  /// - a register representing only part of a value.
-  void EmitDwarfOpPiece(ByteStreamer &Streamer, unsigned SizeInBits,
-                        unsigned OffsetInBits = 0) const;
-
-
-  /// \brief Emit a partial DWARF register operation.
-  /// \param MLoc             the register
-  /// \param PieceSize        size and
-  /// \param PieceOffset      offset of the piece in bits, if this is one
-  ///                         piece of an aggregate value.
-  ///
-  /// If size and offset is zero an operation for the entire
-  /// register is emitted: Some targets do not provide a DWARF
-  /// register number for every register.  If this is the case, this
-  /// function will attempt to emit a DWARF register by emitting a
-  /// piece of a super-register or by piecing together multiple
-  /// subregisters that alias the register.
-  void EmitDwarfRegOpPiece(ByteStreamer &BS, const MachineLocation &MLoc,
-                           unsigned PieceSize = 0,
-                           unsigned PieceOffset = 0) const;
-
   /// EmitDwarfRegOp - Emit a dwarf register operation.
   virtual void EmitDwarfRegOp(ByteStreamer &BS,
                               const MachineLocation &MLoc) const;
@@ -467,6 +446,12 @@ public:
 
   /// \brief Emit frame instruction to describe the layout of the frame.
   void emitCFIInstruction(const MCCFIInstruction &Inst) const;
+
+  /// \brief Emit Dwarf abbreviation table.
+  void emitDwarfAbbrevs(const std::vector<DIEAbbrev *>& Abbrevs) const;
+
+  /// \brief Recursively emit Dwarf DIE tree.
+  void emitDwarfDIE(const DIE &Die) const;
 
   //===------------------------------------------------------------------===//
   // Inline Asm Support

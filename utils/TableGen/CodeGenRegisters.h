@@ -42,10 +42,10 @@ namespace llvm {
   struct MaskRolPair {
     unsigned Mask;
     uint8_t RotateLeft;
-    bool operator==(const MaskRolPair Other) {
+    bool operator==(const MaskRolPair Other) const {
       return Mask == Other.Mask && RotateLeft == Other.RotateLeft;
     }
-    bool operator!=(const MaskRolPair Other) {
+    bool operator!=(const MaskRolPair Other) const {
       return Mask != Other.Mask || RotateLeft != Other.RotateLeft;
     }
   };
@@ -75,7 +75,8 @@ namespace llvm {
     std::string getQualifiedName() const;
 
     // Map of composite subreg indices.
-    typedef DenseMap<CodeGenSubRegIndex *, CodeGenSubRegIndex *> CompMap;
+    typedef std::map<CodeGenSubRegIndex *, CodeGenSubRegIndex *,
+                     deref<llvm::less>> CompMap;
 
     // Returns the subreg index that results from composing this with Idx.
     // Returns NULL if this and Idx don't compose.

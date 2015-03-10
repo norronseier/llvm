@@ -33,11 +33,6 @@
 #include <cstdlib>
 using namespace llvm;
 
-// Handle the Pass registration stuff necessary to use DataLayout's.
-
-INITIALIZE_PASS(DataLayoutPass, "datalayout", "Data Layout", false, true)
-char DataLayoutPass::ID = 0;
-
 //===----------------------------------------------------------------------===//
 // Support for StructLayout
 //===----------------------------------------------------------------------===//
@@ -221,6 +216,7 @@ static unsigned inBytes(unsigned Bits) {
 }
 
 void DataLayout::parseSpecifier(StringRef Desc) {
+  StringRepresentation = Desc;
   while (!Desc.empty()) {
     // Split at '-'.
     std::pair<StringRef, StringRef> Split = split(Desc, '-');
@@ -378,13 +374,7 @@ DataLayout::DataLayout(const Module *M) : LayoutMap(nullptr) {
   init(M);
 }
 
-void DataLayout::init(const Module *M) {
-  const DataLayout *Other = M->getDataLayout();
-  if (Other)
-    *this = *Other;
-  else
-    reset("");
-}
+void DataLayout::init(const Module *M) { *this = M->getDataLayout(); }
 
 bool DataLayout::operator==(const DataLayout &Other) const {
   bool Ret = BigEndian == Other.BigEndian &&
@@ -392,7 +382,7 @@ bool DataLayout::operator==(const DataLayout &Other) const {
              ManglingMode == Other.ManglingMode &&
              LegalIntWidths == Other.LegalIntWidths &&
              Alignments == Other.Alignments && Pointers == Other.Pointers;
-  assert(Ret == (getStringRepresentation() == Other.getStringRepresentation()));
+  // Note: getStringRepresentation() might differs, it is not canonicalized
   return Ret;
 }
 
@@ -489,9 +479,7 @@ unsigned DataLayout::getAlignmentInfo(AlignTypeEnum AlignType,
     // If we didn't find an integer alignment, fall back on most conservative.
     if (AlignType == INTEGER_ALIGN) {
       BestMatchIdx = LargestInt;
-    } else {
-      assert(AlignType == VECTOR_ALIGN && "Unknown alignment type!");
-
+    } else if (AlignType == VECTOR_ALIGN) {
       // By default, use natural alignment for vector types. This is consistent
       // with what clang and llvm-gcc do.
       unsigned Align = getTypeAllocSize(cast<VectorType>(Ty)->getElementType());
@@ -502,6 +490,19 @@ unsigned DataLayout::getAlignmentInfo(AlignTypeEnum AlignType,
         Align = NextPowerOf2(Align);
       return Align;
     }
+  }
+
+  // If we still couldn't find a reasonable default alignment, fall back
+  // to a simple heuristic that the alignment is the first power of two
+  // greater-or-equal to the store size of the type.  This is a reasonable
+  // approximation of reality, and if the user wanted something less
+  // less conservative, they should have specified it explicitly in the data
+  // layout.
+  if (BestMatchIdx == -1) {
+    unsigned Align = getTypeStoreSize(Ty);
+    if (Align & (Align-1))
+      Align = NextPowerOf2(Align);
+    return Align;
   }
 
   // Since we got a "best match" index, just return it.
@@ -567,68 +568,6 @@ const StructLayout *DataLayout::getStructLayout(StructType *Ty) const {
   return L;
 }
 
-std::string DataLayout::getStringRepresentation() const {
-  std::string Result;
-  raw_string_ostream OS(Result);
-
-  OS << (BigEndian ? "E" : "e");
-
-  switch (ManglingMode) {
-  case MM_None:
-    break;
-  case MM_ELF:
-    OS << "-m:e";
-    break;
-  case MM_MachO:
-    OS << "-m:o";
-    break;
-  case MM_WINCOFF:
-    OS << "-m:w";
-    break;
-  case MM_Mips:
-    OS << "-m:m";
-    break;
-  }
-
-  for (const PointerAlignElem &PI : Pointers) {
-    // Skip default.
-    if (PI.AddressSpace == 0 && PI.ABIAlign == 8 && PI.PrefAlign == 8 &&
-        PI.TypeByteWidth == 8)
-      continue;
-
-    OS << "-p";
-    if (PI.AddressSpace) {
-      OS << PI.AddressSpace;
-    }
-    OS << ":" << PI.TypeByteWidth*8 << ':' << PI.ABIAlign*8;
-    if (PI.PrefAlign != PI.ABIAlign)
-      OS << ':' << PI.PrefAlign*8;
-  }
-
-  for (const LayoutAlignElem &AI : Alignments) {
-    if (std::find(std::begin(DefaultAlignments), std::end(DefaultAlignments),
-                  AI) != std::end(DefaultAlignments))
-      continue;
-    OS << '-' << (char)AI.AlignType;
-    if (AI.TypeBitWidth)
-      OS << AI.TypeBitWidth;
-    OS << ':' << AI.ABIAlign*8;
-    if (AI.ABIAlign != AI.PrefAlign)
-      OS << ':' << AI.PrefAlign*8;
-  }
-
-  if (!LegalIntWidths.empty()) {
-    OS << "-n" << (unsigned)LegalIntWidths[0];
-
-    for (unsigned i = 1, e = LegalIntWidths.size(); i != e; ++i)
-      OS << ':' << (unsigned)LegalIntWidths[i];
-  }
-
-  if (StackNaturalAlign)
-    OS << "-S" << StackNaturalAlign*8;
-
-  return OS.str();
-}
 
 unsigned DataLayout::getPointerABIAlignment(unsigned AS) const {
   PointersTy::const_iterator I = findPointerLowerBound(AS);
@@ -844,18 +783,3 @@ unsigned DataLayout::getPreferredAlignmentLog(const GlobalVariable *GV) const {
   return Log2_32(getPreferredAlignment(GV));
 }
 
-DataLayoutPass::DataLayoutPass() : ImmutablePass(ID), DL("") {
-  initializeDataLayoutPassPass(*PassRegistry::getPassRegistry());
-}
-
-DataLayoutPass::~DataLayoutPass() {}
-
-bool DataLayoutPass::doInitialization(Module &M) {
-  DL.init(&M);
-  return false;
-}
-
-bool DataLayoutPass::doFinalization(Module &M) {
-  DL.reset("");
-  return false;
-}

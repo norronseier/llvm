@@ -77,11 +77,11 @@ static gcp_map_type &getGCMap(void *&P) {
 /// getGVAlignmentLog2 - Return the alignment to use for the specified global
 /// value in log2 form.  This rounds up to the preferred alignment if possible
 /// and legal.
-static unsigned getGVAlignmentLog2(const GlobalValue *GV, const DataLayout &TD,
+static unsigned getGVAlignmentLog2(const GlobalValue *GV, const DataLayout &DL,
                                    unsigned InBits = 0) {
   unsigned NumBits = 0;
   if (const GlobalVariable *GVar = dyn_cast<GlobalVariable>(GV))
-    NumBits = TD.getPreferredAlignmentLog(GVar);
+    NumBits = DL.getPreferredAlignmentLog(GVar);
 
   // If InBits is specified, round it to it.
   if (InBits > NumBits)
@@ -556,9 +556,7 @@ void AsmPrinter::EmitFunctionHeader() {
     OutStreamer.EmitLabel(DeadBlockSyms[i]);
   }
 
-  if (!MMI->getLandingPads().empty()) {
-    CurrentFnBegin = createTempSymbol("eh_func_begin", getFunctionNumber());
-
+  if (CurrentFnBegin) {
     if (MAI->useAssignmentForEHBegin()) {
       MCSymbol *CurPos = OutContext.CreateTempSymbol();
       OutStreamer.EmitLabel(CurPos);
@@ -882,27 +880,33 @@ void AsmPrinter::EmitFunctionBody() {
   // Emit target-specific gunk after the function body.
   EmitFunctionBodyEnd();
 
-  if (!MMI->getLandingPads().empty()) {
+  if (!MMI->getLandingPads().empty() || MMI->hasDebugInfo() ||
+      MAI->hasDotTypeDotSizeDirective()) {
     // Create a symbol for the end of function.
-    CurrentFnEnd = createTempSymbol("eh_func_end", getFunctionNumber());
+    CurrentFnEnd = createTempSymbol("func_end", getFunctionNumber());
     OutStreamer.EmitLabel(CurrentFnEnd);
   }
 
   // If the target wants a .size directive for the size of the function, emit
   // it.
   if (MAI->hasDotTypeDotSizeDirective()) {
-    // Create a symbol for the end of function, so we can get the size as
-    // difference between the function label and the temp label.
-    MCSymbol *FnEndLabel = OutContext.CreateTempSymbol();
-    OutStreamer.EmitLabel(FnEndLabel);
-
+    // We can get the size as difference between the function label and the
+    // temp label.
     const MCExpr *SizeExp =
-      MCBinaryExpr::CreateSub(MCSymbolRefExpr::Create(FnEndLabel, OutContext),
+      MCBinaryExpr::CreateSub(MCSymbolRefExpr::Create(CurrentFnEnd, OutContext),
                               MCSymbolRefExpr::Create(CurrentFnSymForSize,
                                                       OutContext),
                               OutContext);
     OutStreamer.EmitELFSize(CurrentFnSym, SizeExp);
   }
+
+  for (const HandlerInfo &HI : Handlers) {
+    NamedRegionTimer T(HI.TimerName, HI.TimerGroupName, TimePassesIsEnabled);
+    HI.Handler->markFunctionEnd();
+  }
+
+  // Print out jump tables referenced by the function.
+  EmitJumpTableInfo();
 
   // Emit post-function debug and/or EH information.
   for (const HandlerInfo &HI : Handlers) {
@@ -910,9 +914,6 @@ void AsmPrinter::EmitFunctionBody() {
     HI.Handler->endFunction(MF);
   }
   MMI->EndFunction();
-
-  // Print out jump tables referenced by the function.
-  EmitJumpTableInfo();
 
   OutStreamer.AddBlankLine();
 }
@@ -1125,6 +1126,14 @@ void AsmPrinter::SetupMachineFunction(MachineFunction &MF) {
   // Get the function symbol.
   CurrentFnSym = getSymbol(MF.getFunction());
   CurrentFnSymForSize = CurrentFnSym;
+  CurrentFnBegin = nullptr;
+  bool NeedsLocalForSize = MAI->needsLocalForSize();
+  if (!MMI->getLandingPads().empty() || MMI->hasDebugInfo() ||
+      NeedsLocalForSize) {
+    CurrentFnBegin = createTempSymbol("func_begin", getFunctionNumber());
+    if (NeedsLocalForSize)
+      CurrentFnSymForSize = CurrentFnBegin;
+  }
 
   if (isVerbose())
     LI = &getAnalysis<MachineLoopInfo>();
@@ -1241,10 +1250,8 @@ void AsmPrinter::EmitJumpTableInfo() {
   bool JTInDiffSection = !TLOF.shouldPutJumpTableInFunctionSection(
       MJTI->getEntryKind() == MachineJumpTableInfo::EK_LabelDifference32,
       *F);
-  if (!JTInDiffSection) {
-    OutStreamer.SwitchSection(TLOF.SectionForGlobal(F, *Mang, TM));
-  } else {
-    // Otherwise, drop it in the readonly section.
+  if (JTInDiffSection) {
+    // Drop it in the readonly section.
     const MCSection *ReadOnlySection =
         TLOF.getSectionForJumpTable(*F, *Mang, TM);
     OutStreamer.SwitchSection(ReadOnlySection);
@@ -1635,8 +1642,7 @@ const MCExpr *AsmPrinter::lowerConstant(const Constant *CV) {
     // If the code isn't optimized, there may be outstanding folding
     // opportunities. Attempt to fold the expression using DataLayout as a
     // last resort before giving up.
-    if (Constant *C = ConstantFoldConstantExpression(
-            CE, TM.getDataLayout()))
+    if (Constant *C = ConstantFoldConstantExpression(CE, *TM.getDataLayout()))
       if (C != CE)
         return lowerConstant(C);
 
@@ -2080,8 +2086,14 @@ static void handleIndirectSymViaGOTPCRel(AsmPrinter &AP, const MCExpr **ME,
   //
   //    gotpcrelcst := <offset from @foo base> + <cst>
   //
+  // If gotpcrelcst is positive it means that we can safely fold the pc rel
+  // displacement into the GOTPCREL. We can also can have an extra offset <cst>
+  // if the target knows how to encode it.
+  //
   int64_t GOTPCRelCst = Offset + MV.getConstant();
   if (GOTPCRelCst < 0)
+    return;
+  if (!AP.getObjFileLowering().supportGOTPCRelWithOffset() && GOTPCRelCst != 0)
     return;
 
   // Emit the GOT PC relative to replace the got equivalent global, i.e.:
@@ -2105,8 +2117,8 @@ static void handleIndirectSymViaGOTPCRel(AsmPrinter &AP, const MCExpr **ME,
   unsigned NumUses = Result.second;
   const GlobalValue *FinalGV = dyn_cast<GlobalValue>(GV->getOperand(0));
   const MCSymbol *FinalSym = AP.getSymbol(FinalGV);
-  *ME = AP.getObjFileLowering().getIndirectSymViaGOTPCRel(FinalSym,
-                                                          GOTPCRelCst);
+  *ME = AP.getObjFileLowering().getIndirectSymViaGOTPCRel(
+      FinalSym, MV, Offset, AP.MMI, AP.OutStreamer);
 
   // Update GOT equivalent usage information
   --NumUses;
@@ -2174,7 +2186,7 @@ static void emitGlobalConstantImpl(const Constant *CV, AsmPrinter &AP,
       // If the constant expression's size is greater than 64-bits, then we have
       // to emit the value in chunks. Try to constant fold the value and emit it
       // that way.
-      Constant *New = ConstantFoldConstantExpression(CE, DL);
+      Constant *New = ConstantFoldConstantExpression(CE, *DL);
       if (New && New != CE)
         return emitGlobalConstantImpl(New, AP);
     }
@@ -2494,3 +2506,5 @@ GCMetadataPrinter *AsmPrinter::GetOrCreateGCPrinter(GCStrategy &S) {
 
 /// Pin vtable to this file.
 AsmPrinterHandler::~AsmPrinterHandler() {}
+
+void AsmPrinterHandler::markFunctionEnd() {}

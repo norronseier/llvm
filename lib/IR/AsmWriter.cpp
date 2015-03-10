@@ -1010,7 +1010,7 @@ static void WriteConstantInternal(raw_ostream &Out, const Constant *CV,
              (StrVal[1] >= '0' && StrVal[1] <= '9'))) {
           // Reparse stringized version!
           if (APFloat(APFloat::IEEEdouble, StrVal).convertToDouble() == Val) {
-            Out << StrVal.str();
+            Out << StrVal;
             return;
           }
         }
@@ -2906,7 +2906,7 @@ void AssemblyWriter::printInstruction(const Instruction &I) {
     } else if (const auto *LI = dyn_cast<LoadInst>(&I)) {
       Out << ' ';
       TypePrinter.print(LI->getType(), Out);
-      Out << ", ";
+      Out << ',';
     }
 
     // PrintAllTypes - Instructions who have operands of all the same type
@@ -2984,29 +2984,6 @@ void AssemblyWriter::printInstruction(const Instruction &I) {
   printInfoComment(I);
 }
 
-static void WriteMDNodeComment(const MDNode *Node,
-                               formatted_raw_ostream &Out) {
-  if (Node->getNumOperands() < 1)
-    return;
-
-  Metadata *Op = Node->getOperand(0);
-  if (!Op || !isa<MDString>(Op))
-    return;
-
-  DIDescriptor Desc(Node);
-  if (!Desc.Verify())
-    return;
-
-  unsigned Tag = Desc.getTag();
-  Out.PadToColumn(50);
-  if (dwarf::TagString(Tag)) {
-    Out << "; ";
-    Desc.print(Out);
-  } else if (Tag == dwarf::DW_TAG_user_base) {
-    Out << "; [ DW_TAG_user_base ]";
-  }
-}
-
 void AssemblyWriter::writeMDNode(unsigned Slot, const MDNode *Node) {
   Out << '!' << Slot << " = ";
   printMDNodeBody(Node);
@@ -3027,7 +3004,6 @@ void AssemblyWriter::writeAllMDNodes() {
 
 void AssemblyWriter::printMDNodeBody(const MDNode *Node) {
   WriteMDNodeBodyInternal(Out, Node, &TypePrinter, &Machine, TheModule);
-  WriteMDNodeComment(Node, Out);
 }
 
 void AssemblyWriter::writeAllAttributeGroups() {
