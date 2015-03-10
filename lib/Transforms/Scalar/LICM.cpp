@@ -74,23 +74,16 @@ DisablePromotion("disable-licm-promotion", cl::Hidden,
 static bool inSubLoop(BasicBlock *BB, Loop *CurLoop, LoopInfo *LI);
 static bool isNotUsedInLoop(Instruction &I, Loop *CurLoop);
 static bool hoist(Instruction &I, BasicBlock *Preheader);
-static bool sink(Instruction &I, LoopInfo *LI, DominatorTree *DT, 
+static bool sink(Instruction &I, LoopInfo *LI, DominatorTree *DT,
                  Loop *CurLoop, AliasSetTracker *CurAST );
 static bool isGuaranteedToExecute(Instruction &Inst, DominatorTree *DT,
                                   Loop *CurLoop, LICMSafetyInfo *SafetyInfo);
-static bool isSafeToExecuteUnconditionally(Instruction &Inst, DominatorTree *DT,
-                                           Loop *CurLoop,
-                                           LICMSafetyInfo *SafetyInfo);
 static bool pointerInvalidatedByLoop(Value *V, uint64_t Size,
-                                     const AAMDNodes &AAInfo, 
+                                     const AAMDNodes &AAInfo,
                                      AliasSetTracker *CurAST);
 static Instruction *CloneInstructionInExitBlock(Instruction &I,
                                                 BasicBlock &ExitBlock,
                                                 PHINode &PN, LoopInfo *LI);
-static bool canSinkOrHoistInst(Instruction &I, AliasAnalysis *AA,
-                               DominatorTree *DT, Loop *CurLoop,
-                               AliasSetTracker *CurAST,
-                               LICMSafetyInfo *SafetyInfo);
 
 namespace {
   struct LICM : public LoopPass {
@@ -248,8 +241,8 @@ bool LICM::runOnLoop(Loop *L, LPPassManager &LPM) {
     // Loop over all of the alias sets in the tracker object.
     for (AliasSetTracker::iterator I = CurAST->begin(), E = CurAST->end();
          I != E; ++I)
-      Changed |= promoteLoopAccessesToScalars(*I, ExitBlocks, InsertPts, 
-                                              PIC, LI, DT, CurLoop, 
+      Changed |= promoteLoopAccessesToScalars(*I, ExitBlocks, InsertPts,
+                                              PIC, LI, DT, CurLoop,
                                               CurAST, &SafetyInfo);
 
     // Once we have promoted values across the loop body we have to recursively
@@ -284,7 +277,7 @@ bool LICM::runOnLoop(Loop *L, LPPassManager &LPM) {
 }
 
 /// Walk the specified region of the CFG (defined by all blocks dominated by
-/// the specified block, and that are in the current loop) in reverse depth 
+/// the specified block, and that are in the current loop) in reverse depth
 /// first order w.r.t the DominatorTree.  This allows us to visit uses before
 /// definitions, allowing us to sink a loop body in one pass without iteration.
 ///
@@ -293,8 +286,8 @@ bool llvm::sinkRegion(DomTreeNode *N, AliasAnalysis *AA, LoopInfo *LI,
                       AliasSetTracker *CurAST, LICMSafetyInfo *SafetyInfo) {
 
   // Verify inputs.
-  assert(N != nullptr && AA != nullptr && LI != nullptr && 
-         DT != nullptr && CurLoop != nullptr && CurAST != nullptr && 
+  assert(N != nullptr && AA != nullptr && LI != nullptr &&
+         DT != nullptr && CurLoop != nullptr && CurAST != nullptr &&
          SafetyInfo != nullptr && "Unexpected input to sinkRegion");
 
   // Set changed as false.
@@ -350,8 +343,8 @@ bool llvm::hoistRegion(DomTreeNode *N, AliasAnalysis *AA, LoopInfo *LI,
                        DominatorTree *DT, TargetLibraryInfo *TLI, Loop *CurLoop,
                        AliasSetTracker *CurAST, LICMSafetyInfo *SafetyInfo) {
   // Verify inputs.
-  assert(N != nullptr && AA != nullptr && LI != nullptr && 
-         DT != nullptr && CurLoop != nullptr && CurAST != nullptr && 
+  assert(N != nullptr && AA != nullptr && LI != nullptr &&
+         DT != nullptr && CurLoop != nullptr && CurAST != nullptr &&
          SafetyInfo != nullptr && "Unexpected input to hoistRegion");
   // Set changed as false.
   bool Changed = false;
@@ -407,10 +400,10 @@ void llvm::computeLICMSafetyInfo(LICMSafetyInfo * SafetyInfo, Loop * CurLoop) {
   for (BasicBlock::iterator I = Header->begin(), E = Header->end();
        (I != E) && !SafetyInfo->HeaderMayThrow; ++I)
     SafetyInfo->HeaderMayThrow |= I->mayThrow();
-  
+
   SafetyInfo->MayThrow = SafetyInfo->HeaderMayThrow;
-  // Iterate over loop instructions and compute safety info. 
-  for (Loop::block_iterator BB = CurLoop->block_begin(), 
+  // Iterate over loop instructions and compute safety info.
+  for (Loop::block_iterator BB = CurLoop->block_begin(),
        BBE = CurLoop->block_end(); (BB != BBE) && !SafetyInfo->MayThrow ; ++BB)
     for (BasicBlock::iterator I = (*BB)->begin(), E = (*BB)->end();
          (I != E) && !SafetyInfo->MayThrow; ++I)
@@ -420,7 +413,7 @@ void llvm::computeLICMSafetyInfo(LICMSafetyInfo * SafetyInfo, Loop * CurLoop) {
 /// canSinkOrHoistInst - Return true if the hoister and sinker can handle this
 /// instruction.
 ///
-bool canSinkOrHoistInst(Instruction &I, AliasAnalysis *AA, DominatorTree *DT,
+bool llvm::canSinkOrHoistInst(Instruction &I, AliasAnalysis *AA, DominatorTree *DT,
                         Loop *CurLoop, AliasSetTracker *CurAST,
                         LICMSafetyInfo *SafetyInfo) {
   // Loads have extra constraints we have to verify before we can hoist them.
@@ -567,7 +560,7 @@ static Instruction *CloneInstructionInExitBlock(Instruction &I,
 /// This method is guaranteed to remove the original instruction from its
 /// position, and may either delete it or move it to outside of the loop.
 ///
-static bool sink(Instruction &I, LoopInfo *LI, DominatorTree *DT, 
+static bool sink(Instruction &I, LoopInfo *LI, DominatorTree *DT,
                  Loop *CurLoop, AliasSetTracker *CurAST ) {
   DEBUG(dbgs() << "LICM sinking instruction: " << I << "\n");
   bool Changed = false;
@@ -579,7 +572,7 @@ static bool sink(Instruction &I, LoopInfo *LI, DominatorTree *DT,
 #ifndef NDEBUG
   SmallVector<BasicBlock *, 32> ExitBlocks;
   CurLoop->getUniqueExitBlocks(ExitBlocks);
-  SmallPtrSet<BasicBlock *, 32> ExitBlockSet(ExitBlocks.begin(), 
+  SmallPtrSet<BasicBlock *, 32> ExitBlockSet(ExitBlocks.begin(),
                                              ExitBlocks.end());
 #endif
 
@@ -637,7 +630,7 @@ static bool hoist(Instruction &I, BasicBlock *Preheader) {
 /// Only sink or hoist an instruction if it is not a trapping instruction
 /// or if it is a trapping instruction and is guaranteed to execute.
 ///
-static bool isSafeToExecuteUnconditionally(Instruction &Inst, DominatorTree *DT,
+bool llvm::isSafeToExecuteUnconditionally(Instruction &Inst, DominatorTree *DT,
                                            Loop *CurLoop,
                                            LICMSafetyInfo *SafetyInfo) {
   // If it is not a trapping instruction, it is always safe to hoist.
@@ -647,7 +640,7 @@ static bool isSafeToExecuteUnconditionally(Instruction &Inst, DominatorTree *DT,
   return isGuaranteedToExecute(Inst, DT, CurLoop, SafetyInfo);
 }
 
-static bool isGuaranteedToExecute(Instruction &Inst, DominatorTree *DT, 
+bool isGuaranteedToExecute(Instruction &Inst, DominatorTree *DT,
                                   Loop *CurLoop, LICMSafetyInfo * SafetyInfo) {
 
   // We have to check to make sure that the instruction dominates all
@@ -770,14 +763,14 @@ namespace {
 bool llvm::promoteLoopAccessesToScalars(AliasSet &AS,
                                         SmallVectorImpl<BasicBlock*>&ExitBlocks,
                                         SmallVectorImpl<Instruction*>&InsertPts,
-                                        PredIteratorCache &PIC, LoopInfo *LI, 
-                                        DominatorTree *DT, Loop *CurLoop, 
-                                        AliasSetTracker *CurAST, 
-                                        LICMSafetyInfo * SafetyInfo) { 
+                                        PredIteratorCache &PIC, LoopInfo *LI,
+                                        DominatorTree *DT, Loop *CurLoop,
+                                        AliasSetTracker *CurAST,
+                                        LICMSafetyInfo * SafetyInfo) {
   // Verify inputs.
-  assert(LI != nullptr && DT != nullptr && 
-         CurLoop != nullptr && CurAST != nullptr && 
-         SafetyInfo != nullptr && 
+  assert(LI != nullptr && DT != nullptr &&
+         CurLoop != nullptr && CurAST != nullptr &&
+         SafetyInfo != nullptr &&
          "Unexpected Input to promoteLoopAccessesToScalars");
   // Initially set Changed status to false.
   bool Changed = false;
@@ -875,7 +868,7 @@ bool llvm::promoteLoopAccessesToScalars(AliasSet &AS,
           }
 
         if (!GuaranteedToExecute)
-          GuaranteedToExecute = isGuaranteedToExecute(*UI, DT, 
+          GuaranteedToExecute = isGuaranteedToExecute(*UI, DT,
                                                       CurLoop, SafetyInfo);
 
       } else
@@ -980,7 +973,7 @@ void LICM::deleteAnalysisLoop(Loop *L) {
 /// location pointed to by V.
 ///
 static bool pointerInvalidatedByLoop(Value *V, uint64_t Size,
-                                     const AAMDNodes &AAInfo, 
+                                     const AAMDNodes &AAInfo,
                                      AliasSetTracker *CurAST) {
   // Check to see if any of the basic blocks in CurLoop invalidate *V.
   return CurAST->getAliasSetForPointer(V, Size, AAInfo).isMod();
