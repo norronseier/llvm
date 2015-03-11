@@ -26,27 +26,6 @@ static bool inSubLoop(BasicBlock *BB, Loop *CurLoop, LoopInfo *LI);
 static bool isUsedOutsideOfLoop(Instruction *I, Loop *L, LoopInfo *LI);
 
 namespace {
-  class GLICMInstrNameGenerator {
-    int CurIndex;
-
-  public:
-    GLICMInstrNameGenerator() : CurIndex(0) {}
-
-    Twine getGEPName() {
-      return "glicm.arrayidx." + Twine(CurIndex++);
-    }
-
-    Twine getArrAllocaName() {
-      return "glicm.arr." + Twine(CurIndex++);
-    }
-
-    Twine getLoadName() {
-      return "glicm.load." + Twine(CurIndex++);
-    }
-  };
-}
-
-namespace {
   struct GLICM : public LoopPass {
     static char ID;
     GLICM() : LoopPass(ID) {
@@ -64,7 +43,9 @@ namespace {
     }
 
   private:
-    GLICMInstrNameGenerator NameGenerator;
+    int counter = 0;
+    long InstrIndex = 0;
+
     DominatorTree *DT;
     LoopInfo *LI;
     AliasAnalysis *AA;
@@ -159,8 +140,8 @@ bool GLICM::runOnLoop(Loop *L, LPPassManager &LPM) {
       TripCount > 0))
     return Changed;
 
-  //if (counter++ > 0)
-  //  return Changed;
+  if (counter++ > 0)
+    return Changed;
 
   createMirrorLoop(ParentLoop, TripCount);
   generalizedHoist(DT->getNode(L->getHeader()), &SafetyInfo);
@@ -297,8 +278,6 @@ bool GLICM::isInvariantForGLICM(Value *V, Loop *OuterLoop) {
     if (PHINode *PhiNode = dyn_cast<PHINode>(I))
       if (PhiNode == IndVar)
         return true;
-
-    dbgs() << "[isInvariantForGlicm] " << CurLoop->getHeader()->getName() << ": " << I->getName() << "\n";
     return CurLoop->isLoopInvariant(I);
   }
 
@@ -367,11 +346,13 @@ void GLICM::replaceUsesWithValueInArray(Instruction *I, Value *Arr,
     BasicBlock *BB = CurLoop->getHeader();
     // Insert a GEP instruction at the beginning of BB.
     GetElementPtrInst *GEP =
-        GetElementPtrInst::Create(Arr, GEPIndices, NameGenerator.getGEPName(),
+        GetElementPtrInst::Create(Arr, GEPIndices,
+                                  "glicm.arrayidx." + Twine(InstrIndex++),
                                   BB->getFirstNonPHI());
 
     // Load Arr[Index], insert it at the beginning of BB (but after GEP).
-    LoadInst *Load = new LoadInst(GEP, NameGenerator.getLoadName(),
+    LoadInst *Load = new LoadInst(GEP,
+                                  "glicm.load." + Twine(InstrIndex++),
                                   BB->getFirstNonPHI());
     Load->removeFromParent();
     Load->insertAfter(GEP);
@@ -387,7 +368,7 @@ void GLICM::replaceUsesWithValueInArray(Instruction *I, Value *Arr,
 AllocaInst *GLICM::createTemporaryArray(Instruction *I, Constant *Size,
                                         BasicBlock* BB) {
   AllocaInst *TmpArr = new AllocaInst(I->getType(), Size,
-                                      NameGenerator.getArrAllocaName(),
+                                      "glicm.arr." + Twine(InstrIndex++),
                                       BB->getTerminator());
   NumTmpArrays++;
   return TmpArr;
@@ -399,7 +380,8 @@ void GLICM::storeInstructionInArray(Instruction *I, Value *Arr, Value *Index) {
   GEPIndices.push_back(Index);
   // First compute the address at which to store I using a GEP instruction.
   GetElementPtrInst *GEP =
-      GetElementPtrInst::Create(Arr, GEPIndices, NameGenerator.getGEPName(), I);
+      GetElementPtrInst::Create(Arr, GEPIndices,
+                                "glicm.arrayidx." + Twine(InstrIndex++), I);
 
   // Workaround: we need to specify a location for S when we create it, but the
   // only options are either (a) at the end of BB or (b) before an instruction.
