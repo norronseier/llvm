@@ -1,4 +1,5 @@
 #include "llvm/ADT/SmallVector.h"
+#include "llvm/ADT/Statistic.h"
 #include "llvm/Analysis/AliasAnalysis.h"
 #include "llvm/Analysis/AliasSetTracker.h"
 #include "llvm/Analysis/LoopInfo.h"
@@ -15,7 +16,12 @@ using namespace llvm;
 
 #define DEBUG_TYPE "glicm"
 
-// Copied from LICM.cpp
+STATISTIC(NumHoisted,   "Number of instructions hoisted to parent loop's "
+                        "pre-header");
+STATISTIC(NumTmpArrays, "Number of temporary arrays allocated");
+
+static bool hoist(Instruction *I, BasicBlock *InsertionBlock);
+static void replaceIndVarOperand(Instruction *I, PHINode *Old, PHINode *New);
 static bool inSubLoop(BasicBlock *BB, Loop *CurLoop, LoopInfo *LI);
 
 namespace {
@@ -36,8 +42,6 @@ namespace {
     }
 
   private:
-    int tmpCount = 0;
-
     DominatorTree *DT;
     LoopInfo *LI;
     AliasAnalysis *AA;
@@ -47,16 +51,15 @@ namespace {
     Loop *CurLoop;
     Loop *ParentLoop;
     PHINode *IndVar;
-    PHINode *phiNode;
-    BasicBlock *NewLoopBody;
-    BasicBlock *NewLoopCond;
+    PHINode *NewLoopIndVar;
+    BasicBlock *NewLoopHeader;
+    BasicBlock *NewLoopLatch;
     BasicBlock *NewLoopPreheader;
 
     void createMirrorLoop(Loop *L, unsigned TripCount);
     bool generalizedHoist(DomTreeNode *N, LICMSafetyInfo *SafetyInfo);
     bool hasLoopInvariantOperands(Instruction *I, Loop *OuterLoop);
     bool isInvariantForGLICM(Value *V, Loop *OuterLoop);
-    void hoist(Instruction *I);
     void replaceScalarsWithArrays(unsigned TripCount);
     bool isUsedInOriginalLoop(Instruction *I);
   };
@@ -77,30 +80,28 @@ bool GLICM::runOnLoop(Loop *L, LPPassManager &LPM) {
   LI = &getAnalysis<LoopInfoWrapperPass>().getLoopInfo();
   AA = &getAnalysis<AliasAnalysis>();
 
-  dbgs() << "===== Current loop: " << *L << " ========\n";
   CurLoop = L;
   unsigned TripCount = SCEV->getSmallConstantTripCount(L);
   IndVar = L->getCanonicalInductionVariable();
   ParentLoop = L->getParentLoop();
 
-  // Compute loop safety information.
+  // Compute Loop safety information.
+  // FIXME: This function computes LICM safety info for the pre-header of the
+  // inspected loop. We want instead to check the pre-header of the parent loop.
   LICMSafetyInfo SafetyInfo;
   computeLICMSafetyInfo(&SafetyInfo, CurLoop);
 
-  // ============ [Start] Copied from LICM ================
+  // Compute the Alias Set Tracker.
   CurAST = new AliasSetTracker(*AA);
-  // Collect Alias info from subloops.
+  // Collect Alias information from subloops.
   for (Loop::iterator LoopItr = L->begin(), LoopItrE = L->end();
        LoopItr != LoopItrE; ++LoopItr) {
     Loop *InnerL = *LoopItr;
     AliasSetTracker *InnerAST = LoopToAliasSetMap[InnerL];
     assert(InnerAST && "Where is my AST?");
 
-    // What if InnerLoop was modified by other passes ?
     CurAST->add(*InnerAST);
 
-    // Once we've incorporated the inner loop's AST into ours, we don't need the
-    // subloop's anymore.
     delete InnerAST;
     LoopToAliasSetMap.erase(InnerL);
   }
@@ -108,22 +109,25 @@ bool GLICM::runOnLoop(Loop *L, LPPassManager &LPM) {
   for (Loop::block_iterator I = L->block_begin(), E = L->block_end();
        I != E; ++I) {
     BasicBlock *BB = *I;
-    if (LI->getLoopFor(BB) == L)        // Ignore blocks in subloops.
-      CurAST->add(*BB);                 // Incorporate the specified basic block
+    if (LI->getLoopFor(BB) == L)
+      CurAST->add(*BB);
   }
 
   if (L->getParentLoop())
     LoopToAliasSetMap[L] = CurAST;
   else
     delete CurAST;
-  // ============= [End] Copied from LICM =================
 
-  // Apply this to loops that have a canonical indvar (starting from 0 and incrementing by 1
-  // on each loop step) and a statically computable trip count.
-  if (ParentLoop && ParentLoop->isLoopSimplifyForm() &&
-      IndVar && TripCount > 0) {
-    if (tmpCount++ > 0)
-      return false;
+  // Apply generalized loop-invariant code motion to loops that satisfy all the
+  // following conditions:
+  // 1) they have a canonical induction variable (starting from 0 and
+  //    incremented by 1 each iteration) and a computable trip count. This is
+  //    needed in order to clone the structure of the loop in the parent loop's
+  //    pre-header.
+  // 2) they have a parent loop which is in loop simplify form (to ensure the
+  //    loop has a valid pre-header)
+  if (ParentLoop && ParentLoop->isLoopSimplifyForm() && IndVar &&
+      TripCount > 0) {
     createMirrorLoop(ParentLoop, TripCount);
     generalizedHoist(DT->getNode(L->getHeader()), &SafetyInfo);
     replaceScalarsWithArrays(TripCount);
@@ -137,47 +141,46 @@ void GLICM::createMirrorLoop(Loop *L, unsigned TripCount) {
   if (!Header || !Preheader)
     return;
 
-  // Create two new BBs. One for the loop body, and one where the loop condition
-  // is tested.
-  NewLoopBody = SplitEdge(Preheader, Header, DT, LI);
-  NewLoopCond = SplitEdge(NewLoopBody, Header, DT, LI);
-  NewLoopBody->setName(CurLoop->getHeader()->getName() + Twine(".gcm.1"));
-  NewLoopCond->setName(CurLoop->getHeader()->getName() + Twine(".gcm.2"));
-  NewLoopPreheader = NewLoopBody->getUniquePredecessor();
+  // Create a header and a latch for the new loop.
+  NewLoopHeader = SplitEdge(Preheader, Header, DT, LI);
+  NewLoopLatch = SplitEdge(NewLoopHeader, Header, DT, LI);
+  NewLoopHeader->setName(CurLoop->getHeader()->getName() + Twine(".gcm.1"));
+  NewLoopLatch->setName(CurLoop->getHeader()->getName() + Twine(".gcm.2"));
+  NewLoopPreheader = NewLoopHeader->getUniquePredecessor();
 
-  // Add a new PhiNode at the end of NewLoopBody. This node corresponds to
+  // Add a new PhiNode at the end of NewLoopHeader. This node corresponds to
   // the induction variable of the new loop
-  phiNode = PHINode::Create(IndVar->getType(), 2,
+  NewLoopIndVar = PHINode::Create(IndVar->getType(), 2,
                                      IndVar->getName() + Twine(".gcm"),
-                                     NewLoopBody->getTerminator());
+                                     NewLoopHeader->getTerminator());
 
   // Increment the induction variable.
   BinaryOperator *nextIndVar = BinaryOperator::
-                    CreateAdd(phiNode,
-                              ConstantInt::getSigned(phiNode->getType(), 1),
-                              phiNode->getName() + Twine(".inc"),
-                              NewLoopCond->getTerminator());
+                    CreateAdd(NewLoopIndVar,
+                              ConstantInt::getSigned(NewLoopIndVar->getType(), 1),
+                              NewLoopIndVar->getName() + Twine(".inc"),
+                              NewLoopLatch->getTerminator());
 
   // Insert a conditional branch instruction based on the induction variable.
   CmpInst *CmpInst = CmpInst::Create(Instruction::ICmp, CmpInst::ICMP_SLE, nextIndVar,
                   ConstantInt::getSigned(nextIndVar->getType(), TripCount),
-                  phiNode->getName() + Twine(".cmp"),
-                  NewLoopCond->getTerminator());
+                  NewLoopIndVar->getName() + Twine(".cmp"),
+                  NewLoopLatch->getTerminator());
 
-  BasicBlock *Dummy = SplitEdge(NewLoopCond, Header, DT, LI);
+  BasicBlock *Dummy = SplitEdge(NewLoopLatch, Header, DT, LI);
   Dummy->setName(CurLoop->getHeader()->getName() + Twine(".gcm.end"));
 
   // Remove the terminator instruction, since it is not needed anymore.
-  Dummy->removePredecessor(NewLoopCond);
-  NewLoopCond->getTerminator()->eraseFromParent();
+  Dummy->removePredecessor(NewLoopLatch);
+  NewLoopLatch->getTerminator()->eraseFromParent();
 
   // Create the branch, finalizing the loop.
-  BranchInst::Create(NewLoopBody, Dummy, CmpInst, NewLoopCond);
+  BranchInst::Create(NewLoopHeader, Dummy, CmpInst, NewLoopLatch);
 
   // Fill in incoming values for the PhiNode.
-  phiNode->addIncoming(ConstantInt::getSigned(phiNode->getType(), 0),
+  NewLoopIndVar->addIncoming(ConstantInt::getSigned(NewLoopIndVar->getType(), 0),
                        Preheader);
-  phiNode->addIncoming(nextIndVar, NewLoopCond);
+  NewLoopIndVar->addIncoming(nextIndVar, NewLoopLatch);
 
   // Construction of the replicated loop is now complete.
   return;
@@ -200,19 +203,17 @@ bool GLICM::generalizedHoist(DomTreeNode* N, LICMSafetyInfo *SafetyInfo) {
         // This is the induction variable, do not hoist it
         continue;
 
-      dbgs() << "Instruction: " << I << "\n";
-      bool i1 = hasLoopInvariantOperands(&I, ParentLoop);
-      bool i2 = canSinkOrHoistInst(I, AA, DT, CurLoop, CurAST, SafetyInfo);
-      bool i3 = isSafeToExecuteUnconditionally(I, DT, CurLoop, SafetyInfo);
-      dbgs() << i1 << " " << i2 << " " << i3 << "\n";
-      /*if (isInvariantInGivenLoop(&I, ParentLoop) &&
+      // dbgs() << "Instruction: " << I << "\n";
+      // bool i1 = hasLoopInvariantOperands(&I, ParentLoop);
+      // bool i2 = canSinkOrHoistInst(I, AA, DT, CurLoop, CurAST, SafetyInfo);
+      // bool i3 = isSafeToExecuteUnconditionally(I, DT, CurLoop, SafetyInfo);
+      // dbgs() << i1 << " " << i2 << " " << i3 << "\n";
+      if (hasLoopInvariantOperands(&I, ParentLoop) &&
           canSinkOrHoistInst(I, AA, DT, CurLoop, CurAST, SafetyInfo) &&
-          isSafeToExecuteUnconditionally(I, DT, CurLoop, SafetyInfo)) { */
-      if (i1 && i2 && i3) {
-        hoist(&I);
-        dbgs() << "Would hoist.\n";
-      } else
-        dbgs() << "Would not hoist.\n";
+          isSafeToExecuteUnconditionally(I, DT, CurLoop, SafetyInfo)) {
+        hoist(&I, NewLoopHeader);
+        replaceIndVarOperand(&I, IndVar, NewLoopIndVar);
+      }
     }
   }
   const std::vector<DomTreeNode*> &Children = N->getChildren();
@@ -227,14 +228,6 @@ bool GLICM::hasLoopInvariantOperands(Instruction *I, Loop *OuterLoop) {
       return false;
 
   return true;
-}
-
-void GLICM::hoist(Instruction *I) {
-  for (unsigned i = 0, e = I->getNumOperands(); i != e; ++i)
-    if (PHINode *PhiNode = dyn_cast<PHINode>(I->getOperand(i)))
-      if (PhiNode == IndVar)
-        I->replaceUsesOfWith(IndVar, phiNode);
-  I->moveBefore(NewLoopBody->getTerminator());
 }
 
 bool GLICM::isInvariantForGLICM(Value *V, Loop *OuterLoop) {
@@ -255,10 +248,10 @@ void GLICM::replaceScalarsWithArrays(unsigned TripCount) {
 
   // Construct a list of all the instructions that are used in the original
   // loop. These will need to be stored in temporary arrays.
-  for (BasicBlock::iterator II = NewLoopBody->begin(), E = NewLoopBody->end();
+  for (BasicBlock::iterator II = NewLoopHeader->begin(), E = NewLoopHeader->end();
        II != E; ) {
     Instruction &I = *II++;
-    if (&I == phiNode)
+    if (&I == NewLoopIndVar)
       continue;
     if (isUsedInOriginalLoop(&I))
       instructions.push_back(&I);
@@ -268,10 +261,10 @@ void GLICM::replaceScalarsWithArrays(unsigned TripCount) {
   if (instructions.empty())
     return;
 
-  BasicBlock *TmpArrBlock = SplitEdge(NewLoopPreheader, NewLoopBody, DT, LI);
-  TmpArrBlock->setName(NewLoopBody->getName() + Twine(".tmparr"));
+  BasicBlock *TmpArrBlock = SplitEdge(NewLoopPreheader, NewLoopHeader, DT, LI);
+  TmpArrBlock->setName(NewLoopHeader->getName() + Twine(".tmparr"));
 
-  Constant *tmpArrSize = ConstantInt::getSigned(phiNode->getType(), TripCount);
+  Constant *tmpArrSize = ConstantInt::getSigned(NewLoopIndVar->getType(), TripCount);
   dbgs() << "Array size: " << *tmpArrSize << "\n";
 
   for (std::vector<Instruction*>::iterator it = instructions.begin();
@@ -285,12 +278,14 @@ void GLICM::replaceScalarsWithArrays(unsigned TripCount) {
                                         tmpArrSize,
                                         Instr->getName() + Twine(".tmparr"),
                                         TmpArrBlock->getTerminator());
-                                        //NewLoopBody->getFirstNonPHI());
+                                        //NewLoopHeader->getFirstNonPHI());
+
+    NumTmpArrays++;
 
     SmallVector<Value*, 8> GEPIdx;
-    GEPIdx.push_back(phiNode);
+    GEPIdx.push_back(NewLoopIndVar);
     GetElementPtrInst *GEP = GetElementPtrInst::Create(tmpArr, GEPIdx, Instr->getName() + Twine(".idx"),
-                              NewLoopBody->getFirstNonPHI());
+                              NewLoopHeader->getFirstNonPHI());
 
     StoreInst *store = new StoreInst(Instr, GEP, TmpArrBlock);
     store->removeFromParent();
@@ -333,6 +328,19 @@ bool GLICM::isUsedInOriginalLoop(Instruction *I) {
     }
   }
   return false;
+}
+
+static bool hoist(Instruction *I, BasicBlock *InsertionBlock) {
+  I->moveBefore(InsertionBlock->getTerminator());
+  NumHoisted++;
+  return true;
+}
+
+static void replaceIndVarOperand(Instruction *I, PHINode *Old, PHINode *New) {
+  for (unsigned i = 0, e = I->getNumOperands(); i != e; ++i)
+    if (PHINode *PhiOp = dyn_cast<PHINode>(I->getOperand(i)))
+      if (PhiOp == Old)
+        I->replaceUsesOfWith(Old, New);
 }
 
 static bool inSubLoop(BasicBlock *BB, Loop *CurLoop, LoopInfo *LI) {
