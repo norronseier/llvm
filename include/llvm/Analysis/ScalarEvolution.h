@@ -256,6 +256,10 @@ namespace llvm {
     /// Mark predicate values currently being processed by isImpliedCond.
     DenseSet<Value*> PendingLoopPredicates;
 
+    /// Set to true by isLoopBackedgeGuardedByCond when we're walking the set of
+    /// conditions dominating the backedge of a loop.
+    bool WalkingBEDominatingConds;
+
     /// ExitLimit - Information about the number of loop iterations for which a
     /// loop exit's branch condition evaluates to the not-taken path.  This is a
     /// temporary pair of exact and max expressions that are eventually
@@ -534,6 +538,15 @@ namespace llvm {
                                      const SCEV *LHS, const SCEV *RHS,
                                      const SCEV *FoundLHS,
                                      const SCEV *FoundRHS);
+
+    /// isImpliedCondOperandsViaRanges - Test whether the condition described by
+    /// Pred, LHS, and RHS is true whenever the condition described by Pred,
+    /// FoundLHS, and FoundRHS is true.  Utility function used by
+    /// isImpliedCondOperands.
+    bool isImpliedCondOperandsViaRanges(ICmpInst::Predicate Pred,
+                                        const SCEV *LHS, const SCEV *RHS,
+                                        const SCEV *FoundLHS,
+                                        const SCEV *FoundRHS);
 
     /// getConstantEvolutionLoopExitValue - If we know that the specified Phi is
     /// in the header of its containing loop, we know the loop executes a

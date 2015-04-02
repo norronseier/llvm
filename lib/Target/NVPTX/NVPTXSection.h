@@ -26,7 +26,8 @@ namespace llvm {
 class NVPTXSection : public MCSection {
   virtual void anchor();
 public:
-  NVPTXSection(SectionVariant V, SectionKind K) : MCSection(V, K) {}
+  NVPTXSection(SectionVariant V, SectionKind K)
+      : MCSection(V, K, nullptr, /*Unique*/ false) {}
   virtual ~NVPTXSection() {}
 
   /// Override this as NVPTX has its own way of printing switching

@@ -26,7 +26,7 @@
 namespace llvm {
 
 struct EVT;
-
+class HexagonSubtarget;
 class HexagonInstrInfo : public HexagonGenInstrInfo {
   virtual void anchor();
   const HexagonRegisterInfo RI;
@@ -216,9 +216,7 @@ public:
   short getNonExtOpcode(const MachineInstr *MI) const;
   bool PredOpcodeHasJMP_c(Opcode_t Opcode) const;
   bool PredOpcodeHasNot(Opcode_t Opcode) const;
-
-private:
-  int getMatchingCondBranchOpcode(int Opc, bool sense) const;
+  int getCondOpcode(int Opc, bool sense) const;
 
 };
 

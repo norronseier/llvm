@@ -129,6 +129,11 @@ bool canSinkOrHoistInst(Instruction &I, AliasAnalysis *AA,
 bool isSafeToExecuteUnconditionally(Instruction &Inst, DominatorTree *DT,
                                            Loop *CurLoop,
                                            LICMSafetyInfo *SafetyInfo);
+
+/// \brief Checks if the given PHINode in a loop header is an induction
+/// variable. Returns true if this is an induction PHI along with the step
+/// value.
+bool isInductionPHI(PHINode *, ScalarEvolution *, ConstantInt *&);
 }
 
 #endif

@@ -10,6 +10,7 @@ add_llvm_library(LLVMScalarOpts
   EarlyCSE.cpp
   FlattenCFGPass.cpp
   GLICM.cpp
+  Float2Int.cpp
   GVN.cpp
   InductiveRangeCheckElimination.cpp
   IndVarSimplify.cpp

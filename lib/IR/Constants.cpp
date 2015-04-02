@@ -2010,7 +2010,8 @@ Constant *ConstantExpr::getGetElementPtr(Constant *C, ArrayRef<Value *> Idxs,
     return FC;          // Fold a few common cases.
 
   // Get the result type of the getelementptr!
-  Type *Ty = GetElementPtrInst::getIndexedType(C->getType(), Idxs);
+  Type *Ty = GetElementPtrInst::getIndexedType(
+      cast<PointerType>(C->getType()->getScalarType())->getElementType(), Idxs);
   assert(Ty && "GEP indices invalid!");
   unsigned AS = C->getType()->getPointerAddressSpace();
   Type *ReqTy = Ty->getPointerTo(AS);
@@ -3001,12 +3002,14 @@ Instruction *ConstantExpr::getAsInstruction() {
   case Instruction::ShuffleVector:
     return new ShuffleVectorInst(Ops[0], Ops[1], Ops[2]);
 
-  case Instruction::GetElementPtr:
-    if (cast<GEPOperator>(this)->isInBounds())
-      return GetElementPtrInst::CreateInBounds(Ops[0], Ops.slice(1));
-    else
-      return GetElementPtrInst::Create(Ops[0], Ops.slice(1));
-
+  case Instruction::GetElementPtr: {
+    const auto *GO = cast<GEPOperator>(this);
+    if (GO->isInBounds())
+      return GetElementPtrInst::CreateInBounds(GO->getSourceElementType(),
+                                               Ops[0], Ops.slice(1));
+    return GetElementPtrInst::Create(GO->getSourceElementType(), Ops[0],
+                                     Ops.slice(1));
+  }
   case Instruction::ICmp:
   case Instruction::FCmp:
     return CmpInst::Create((Instruction::OtherOps)getOpcode(),

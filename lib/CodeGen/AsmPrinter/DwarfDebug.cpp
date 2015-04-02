@@ -45,6 +45,7 @@
 #include "llvm/Support/MD5.h"
 #include "llvm/Support/Path.h"
 #include "llvm/Support/Timer.h"
+#include "llvm/Support/raw_ostream.h"
 #include "llvm/Target/TargetFrameLowering.h"
 #include "llvm/Target/TargetLoweringObjectFile.h"
 #include "llvm/Target/TargetMachine.h"
@@ -111,11 +112,11 @@ void DebugLocDwarfExpression::EmitOp(uint8_t Op, const char *Comment) {
                   : dwarf::OperationEncodingString(Op));
 }
 
-void DebugLocDwarfExpression::EmitSigned(int Value) {
+void DebugLocDwarfExpression::EmitSigned(int64_t Value) {
   BS.EmitSLEB128(Value, Twine(Value));
 }
 
-void DebugLocDwarfExpression::EmitUnsigned(unsigned Value) {
+void DebugLocDwarfExpression::EmitUnsigned(uint64_t Value) {
   BS.EmitULEB128(Value, Twine(Value));
 }
 
@@ -188,7 +189,7 @@ static LLVM_CONSTEXPR DwarfAccelTable::Atom TypeAtoms[] = {
     DwarfAccelTable::Atom(dwarf::DW_ATOM_type_flags, dwarf::DW_FORM_data1)};
 
 DwarfDebug::DwarfDebug(AsmPrinter *A, Module *M)
-    : Asm(A), MMI(Asm->MMI), PrevLabel(nullptr), GlobalRangeCount(0),
+    : Asm(A), MMI(Asm->MMI), PrevLabel(nullptr),
       InfoHolder(A, "info_string", DIEValueAllocator),
       UsedNonDefaultText(false),
       SkeletonHolder(A, "skel_string", DIEValueAllocator),
@@ -202,11 +203,6 @@ DwarfDebug::DwarfDebug(AsmPrinter *A, Module *M)
                                            dwarf::DW_FORM_data4)),
       AccelTypes(TypeAtoms) {
 
-  DwarfInfoSectionSym = DwarfAbbrevSectionSym = DwarfStrSectionSym = nullptr;
-  DwarfDebugRangeSectionSym = DwarfDebugLocSectionSym = nullptr;
-  DwarfLineSectionSym = nullptr;
-  DwarfAddrSectionSym = nullptr;
-  DwarfAbbrevDWOSectionSym = DwarfStrDWOSectionSym = nullptr;
   CurFn = nullptr;
   CurMI = nullptr;
 
@@ -245,19 +241,6 @@ DwarfDebug::DwarfDebug(AsmPrinter *A, Module *M)
 
 // Define out of line so we don't have to include DwarfUnit.h in DwarfDebug.h.
 DwarfDebug::~DwarfDebug() { }
-
-// Switch to the specified MCSection and emit an assembler
-// temporary label to it if SymbolStem is specified.
-static MCSymbol *emitSectionSym(AsmPrinter *Asm, const MCSection *Section,
-                                const char *SymbolStem = nullptr) {
-  Asm->OutStreamer.SwitchSection(Section);
-  if (!SymbolStem)
-    return nullptr;
-
-  MCSymbol *TmpSym = Asm->GetTempSymbol(SymbolStem);
-  Asm->OutStreamer.EmitLabel(TmpSym);
-  return TmpSym;
-}
 
 static bool isObjCClass(StringRef Name) {
   return Name.startswith("+") || Name.startswith("-");
@@ -404,7 +387,7 @@ DwarfCompileUnit &DwarfDebug::constructDwarfCompileUnit(DICompileUnit DIUnit) {
   NewCU.addString(Die, dwarf::DW_AT_name, FN);
 
   if (!useSplitDwarf()) {
-    NewCU.initStmtList(DwarfLineSectionSym);
+    NewCU.initStmtList();
 
     // If we're using split dwarf the compilation dir is going to be in the
     // skeleton CU and so we don't need to duplicate it here.
@@ -426,11 +409,9 @@ DwarfCompileUnit &DwarfDebug::constructDwarfCompileUnit(DICompileUnit DIUnit) {
                   dwarf::DW_FORM_data1, RVer);
 
   if (useSplitDwarf())
-    NewCU.initSection(Asm->getObjFileLowering().getDwarfInfoDWOSection(),
-                      DwarfInfoDWOSectionSym);
+    NewCU.initSection(Asm->getObjFileLowering().getDwarfInfoDWOSection());
   else
-    NewCU.initSection(Asm->getObjFileLowering().getDwarfInfoSection(),
-                      DwarfInfoSectionSym);
+    NewCU.initSection(Asm->getObjFileLowering().getDwarfInfoSection());
 
   CUMap.insert(std::make_pair(DIUnit, &NewCU));
   CUDieMap.insert(std::make_pair(&Die, &NewCU));
@@ -460,9 +441,6 @@ void DwarfDebug::beginModule() {
   if (!CU_Nodes)
     return;
   TypeIdentifierMap = generateDITypeIdentifierMap(CU_Nodes);
-
-  // Emit initial sections so we can reference labels later.
-  emitSectionLabels();
 
   SingleCU = CU_Nodes->getNumOperands() == 1;
 
@@ -560,6 +538,8 @@ void DwarfDebug::collectDeadVariables() {
 }
 
 void DwarfDebug::finalizeModuleInfo() {
+  const TargetLoweringObjectFile &TLOF = Asm->getObjFileLowering();
+
   finishSubprogramDefinitions();
 
   finishVariableDefinitions();
@@ -589,13 +569,16 @@ void DwarfDebug::finalizeModuleInfo() {
 
       // We don't keep track of which addresses are used in which CU so this
       // is a bit pessimistic under LTO.
-      if (!AddrPool.isEmpty())
+      if (!AddrPool.isEmpty()) {
+        const MCSymbol *Sym = TLOF.getDwarfAddrSection()->getBeginSymbol();
         SkCU->addSectionLabel(SkCU->getUnitDie(), dwarf::DW_AT_GNU_addr_base,
-                              DwarfAddrSectionSym, DwarfAddrSectionSym);
-      if (!SkCU->getRangeLists().empty())
+                              Sym, Sym);
+      }
+      if (!SkCU->getRangeLists().empty()) {
+        const MCSymbol *Sym = TLOF.getDwarfRangesSection()->getBeginSymbol();
         SkCU->addSectionLabel(SkCU->getUnitDie(), dwarf::DW_AT_GNU_ranges_base,
-                              DwarfDebugRangeSectionSym,
-                              DwarfDebugRangeSectionSym);
+                              Sym, Sym);
+      }
     }
 
     // If we have code split among multiple sections or non-contiguous
@@ -632,7 +615,7 @@ void DwarfDebug::endModule() {
   // If we aren't actually generating debug info (check beginModule -
   // conditionalized on !DisableDebugInfoPrinting and the presence of the
   // llvm.dbg.cu metadata node)
-  if (!DwarfInfoSectionSym)
+  if (!MMI->hasDebugInfo())
     return;
 
   // Finalize the debug info for the module.
@@ -640,11 +623,17 @@ void DwarfDebug::endModule() {
 
   emitDebugStr();
 
-  // Emit all the DIEs into a debug info section.
-  emitDebugInfo();
+  if (useSplitDwarf())
+    emitDebugLocDWO();
+  else
+    // Emit info into a debug loc section.
+    emitDebugLoc();
 
   // Corresponding abbreviations into a abbrev section.
   emitAbbreviations();
+
+  // Emit all the DIEs into a debug info section.
+  emitDebugInfo();
 
   // Emit info into a debug aranges section.
   if (GenerateARangeSection)
@@ -658,12 +647,9 @@ void DwarfDebug::endModule() {
     emitDebugInfoDWO();
     emitDebugAbbrevDWO();
     emitDebugLineDWO();
-    emitDebugLocDWO();
     // Emit DWO addresses.
     AddrPool.emit(*Asm, Asm->getObjFileLowering().getDwarfAddrSection());
-  } else
-    // Emit info into a debug loc section.
-    emitDebugLoc();
+  }
 
   // Emit info into the dwarf accelerator table sections.
   if (useDwarfAccelTables()) {
@@ -718,7 +704,8 @@ void DwarfDebug::ensureAbstractVariableIsCreated(const DIVariable &DV,
   if (getExistingAbstractVariable(DV, Cleansed))
     return;
 
-  createAbstractVariable(Cleansed, LScopes.getOrCreateAbstractScope(ScopeNode));
+  createAbstractVariable(Cleansed, LScopes.getOrCreateAbstractScope(
+                                       cast<MDLocalScope>(ScopeNode)));
 }
 
 void
@@ -728,7 +715,8 @@ DwarfDebug::ensureAbstractVariableIsCreatedIfScoped(const DIVariable &DV,
   if (getExistingAbstractVariable(DV, Cleansed))
     return;
 
-  if (LexicalScope *Scope = LScopes.findAbstractScope(ScopeNode))
+  if (LexicalScope *Scope =
+          LScopes.findAbstractScope(cast_or_null<MDLocalScope>(ScopeNode)))
     createAbstractVariable(Cleansed, Scope);
 }
 
@@ -915,10 +903,10 @@ DwarfDebug::collectVariableInfo(DwarfCompileUnit &TheCU, DISubprogram SP,
       continue;
 
     LexicalScope *Scope = nullptr;
-    if (MDNode *IA = DV.getInlinedAt())
-      Scope = LScopes.findInlinedScope(DV.getContext(), IA);
+    if (MDLocation *IA = DV.get()->getInlinedAt())
+      Scope = LScopes.findInlinedScope(DV.get()->getScope(), IA);
     else
-      Scope = LScopes.findLexicalScope(DV.getContext());
+      Scope = LScopes.findLexicalScope(DV.get()->getScope());
     // If variable scope is not found then skip this variable.
     if (!Scope)
       continue;
@@ -941,8 +929,7 @@ DwarfDebug::collectVariableInfo(DwarfCompileUnit &TheCU, DISubprogram SP,
     DotDebugLocEntries.resize(DotDebugLocEntries.size() + 1);
     DebugLocList &LocList = DotDebugLocEntries.back();
     LocList.CU = &TheCU;
-    LocList.Label =
-        Asm->GetTempSymbol("debug_loc", DotDebugLocEntries.size() - 1);
+    LocList.Label = Asm->createTempSymbol("debug_loc");
 
     // Build the location list for this variable.
     buildLocationList(LocList.List, Ranges);
@@ -958,7 +945,7 @@ DwarfDebug::collectVariableInfo(DwarfCompileUnit &TheCU, DISubprogram SP,
     assert(DV.isVariable());
     if (!Processed.insert(DV).second)
       continue;
-    if (LexicalScope *Scope = LScopes.findLexicalScope(DV.getContext())) {
+    if (LexicalScope *Scope = LScopes.findLexicalScope(DV.get()->getScope())) {
       ensureAbstractVariableIsCreatedIfScoped(DV, Scope->getScopeNode());
       DIExpression NoExpr;
       ConcreteVariables.push_back(make_unique<DbgVariable>(DV, NoExpr, this));
@@ -986,23 +973,25 @@ void DwarfDebug::beginInstruction(const MachineInstr *MI) {
   // Check if source location changes, but ignore DBG_VALUE locations.
   if (!MI->isDebugValue()) {
     DebugLoc DL = MI->getDebugLoc();
-    if (DL != PrevInstLoc && (!DL.isUnknown() || UnknownLocations)) {
-      unsigned Flags = 0;
-      PrevInstLoc = DL;
-      if (DL == PrologEndLoc) {
-        Flags |= DWARF2_FLAG_PROLOGUE_END;
-        PrologEndLoc = DebugLoc();
-        Flags |= DWARF2_FLAG_IS_STMT;
-      }
-      if (DL.getLine() !=
-          Asm->OutStreamer.getContext().getCurrentDwarfLoc().getLine())
-        Flags |= DWARF2_FLAG_IS_STMT;
+    if (DL != PrevInstLoc) {
+      if (DL) {
+        unsigned Flags = 0;
+        PrevInstLoc = DL;
+        if (DL == PrologEndLoc) {
+          Flags |= DWARF2_FLAG_PROLOGUE_END;
+          PrologEndLoc = DebugLoc();
+          Flags |= DWARF2_FLAG_IS_STMT;
+        }
+        if (DL.getLine() !=
+            Asm->OutStreamer.getContext().getCurrentDwarfLoc().getLine())
+          Flags |= DWARF2_FLAG_IS_STMT;
 
-      if (!DL.isUnknown()) {
-        const MDNode *Scope = DL.getScope(Asm->MF->getFunction()->getContext());
+        const MDNode *Scope = DL.getScope();
         recordSourceLine(DL.getLine(), DL.getCol(), Scope, Flags);
-      } else
+      } else if (UnknownLocations) {
+        PrevInstLoc = DL;
         recordSourceLine(0, 0, nullptr, 0);
+      }
     }
   }
 
@@ -1085,7 +1074,7 @@ static DebugLoc findPrologueEndLoc(const MachineFunction *MF) {
   for (const auto &MBB : *MF)
     for (const auto &MI : MBB)
       if (!MI.isDebugValue() && !MI.getFlag(MachineInstr::FrameSetup) &&
-          !MI.getDebugLoc().isUnknown()) {
+          MI.getDebugLoc()) {
         // Did the target forget to set the FrameSetup flag for CFI insns?
         assert(!MI.isCFIInstruction() &&
                "First non-frame-setup instruction is a CFI instruction.");
@@ -1181,15 +1170,11 @@ void DwarfDebug::beginFunction(const MachineFunction *MF) {
 
   // Record beginning of function.
   PrologEndLoc = findPrologueEndLoc(MF);
-  if (!PrologEndLoc.isUnknown()) {
-    DebugLoc FnStartDL =
-        PrologEndLoc.getFnDebugLoc(MF->getFunction()->getContext());
-
+  if (MDLocation *L = PrologEndLoc) {
     // We'd like to list the prologue as "not statements" but GDB behaves
     // poorly if we do that. Revisit this with caution/GDB (7.5+) testing.
-    recordSourceLine(FnStartDL.getLine(), FnStartDL.getCol(),
-                     FnStartDL.getScope(MF->getFunction()->getContext()),
-                     DWARF2_FLAG_IS_STMT);
+    auto *SP = L->getInlinedAtScope()->getSubprogram();
+    recordSourceLine(SP->getScopeLine(), 0, SP, DWARF2_FLAG_IS_STMT);
   }
 }
 
@@ -1302,60 +1287,10 @@ void DwarfDebug::recordSourceLine(unsigned Line, unsigned Col, const MDNode *S,
 // Emit Methods
 //===----------------------------------------------------------------------===//
 
-// Emit initial Dwarf sections with a label at the start of each one.
-void DwarfDebug::emitSectionLabels() {
-  const TargetLoweringObjectFile &TLOF = Asm->getObjFileLowering();
-
-  // Dwarf sections base addresses.
-  DwarfInfoSectionSym =
-      emitSectionSym(Asm, TLOF.getDwarfInfoSection(), "section_info");
-  if (useSplitDwarf()) {
-    DwarfInfoDWOSectionSym =
-        emitSectionSym(Asm, TLOF.getDwarfInfoDWOSection(), "section_info_dwo");
-    DwarfTypesDWOSectionSym = emitSectionSym(
-        Asm, TLOF.getDwarfTypesDWOSection(), "section_types_dwo");
-  }
-  DwarfAbbrevSectionSym =
-      emitSectionSym(Asm, TLOF.getDwarfAbbrevSection(), "section_abbrev");
-  if (useSplitDwarf())
-    DwarfAbbrevDWOSectionSym = emitSectionSym(
-        Asm, TLOF.getDwarfAbbrevDWOSection(), "section_abbrev_dwo");
-  if (GenerateARangeSection)
-    emitSectionSym(Asm, TLOF.getDwarfARangesSection());
-
-  DwarfLineSectionSym =
-      emitSectionSym(Asm, TLOF.getDwarfLineSection(), "section_line");
-  if (GenerateGnuPubSections) {
-    DwarfGnuPubNamesSectionSym =
-        emitSectionSym(Asm, TLOF.getDwarfGnuPubNamesSection());
-    DwarfGnuPubTypesSectionSym =
-        emitSectionSym(Asm, TLOF.getDwarfGnuPubTypesSection());
-  } else if (HasDwarfPubSections) {
-    emitSectionSym(Asm, TLOF.getDwarfPubNamesSection());
-    emitSectionSym(Asm, TLOF.getDwarfPubTypesSection());
-  }
-
-  DwarfStrSectionSym =
-      emitSectionSym(Asm, TLOF.getDwarfStrSection(), "info_string");
-  if (useSplitDwarf()) {
-    DwarfStrDWOSectionSym =
-        emitSectionSym(Asm, TLOF.getDwarfStrDWOSection(), "skel_string");
-    DwarfAddrSectionSym =
-        emitSectionSym(Asm, TLOF.getDwarfAddrSection(), "addr_sec");
-    DwarfDebugLocSectionSym =
-        emitSectionSym(Asm, TLOF.getDwarfLocDWOSection(), "skel_loc");
-  } else
-    DwarfDebugLocSectionSym =
-        emitSectionSym(Asm, TLOF.getDwarfLocSection(), "section_debug_loc");
-  DwarfDebugRangeSectionSym =
-      emitSectionSym(Asm, TLOF.getDwarfRangesSection(), "debug_range");
-}
-
 // Emit the debug info section.
 void DwarfDebug::emitDebugInfo() {
   DwarfFile &Holder = useSplitDwarf() ? SkeletonHolder : InfoHolder;
-
-  Holder.emitUnits(DwarfAbbrevSectionSym);
+  Holder.emitUnits(/* UseOffsets */ false);
 }
 
 // Emit the abbreviation section.
@@ -1365,65 +1300,39 @@ void DwarfDebug::emitAbbreviations() {
   Holder.emitAbbrevs(Asm->getObjFileLowering().getDwarfAbbrevSection());
 }
 
-// Emit the last address of the section and the end of the line matrix.
-void DwarfDebug::emitEndOfLineMatrix(unsigned SectionEnd) {
-  // Define last address of section.
-  Asm->OutStreamer.AddComment("Extended Op");
-  Asm->EmitInt8(0);
-
-  Asm->OutStreamer.AddComment("Op size");
-  Asm->EmitInt8(Asm->getDataLayout().getPointerSize() + 1);
-  Asm->OutStreamer.AddComment("DW_LNE_set_address");
-  Asm->EmitInt8(dwarf::DW_LNE_set_address);
-
-  Asm->OutStreamer.AddComment("Section end label");
-
-  Asm->OutStreamer.EmitSymbolValue(
-      Asm->GetTempSymbol("section_end", SectionEnd),
-      Asm->getDataLayout().getPointerSize());
-
-  // Mark end of matrix.
-  Asm->OutStreamer.AddComment("DW_LNE_end_sequence");
-  Asm->EmitInt8(0);
-  Asm->EmitInt8(1);
-  Asm->EmitInt8(1);
-}
-
 void DwarfDebug::emitAccel(DwarfAccelTable &Accel, const MCSection *Section,
-                           StringRef TableName, StringRef SymName) {
+                           StringRef TableName) {
   Accel.FinalizeTable(Asm, TableName);
   Asm->OutStreamer.SwitchSection(Section);
-  auto *SectionBegin = Asm->GetTempSymbol(SymName);
-  Asm->OutStreamer.EmitLabel(SectionBegin);
 
   // Emit the full data.
-  Accel.Emit(Asm, SectionBegin, this, DwarfStrSectionSym);
+  Accel.emit(Asm, Section->getBeginSymbol(), this);
 }
 
 // Emit visible names into a hashed accelerator table section.
 void DwarfDebug::emitAccelNames() {
   emitAccel(AccelNames, Asm->getObjFileLowering().getDwarfAccelNamesSection(),
-            "Names", "names_begin");
+            "Names");
 }
 
 // Emit objective C classes and categories into a hashed accelerator table
 // section.
 void DwarfDebug::emitAccelObjC() {
   emitAccel(AccelObjC, Asm->getObjFileLowering().getDwarfAccelObjCSection(),
-            "ObjC", "objc_begin");
+            "ObjC");
 }
 
 // Emit namespace dies into a hashed accelerator table.
 void DwarfDebug::emitAccelNamespaces() {
   emitAccel(AccelNamespace,
             Asm->getObjFileLowering().getDwarfAccelNamespaceSection(),
-            "namespac", "namespac_begin");
+            "namespac");
 }
 
 // Emit type dies into a hashed accelerator table.
 void DwarfDebug::emitAccelTypes() {
   emitAccel(AccelTypes, Asm->getObjFileLowering().getDwarfAccelTypesSection(),
-            "types", "types_begin");
+            "types");
 }
 
 // Public name handling.
@@ -1506,15 +1415,14 @@ void DwarfDebug::emitDebugPubSection(
 
     if (auto *Skeleton = TheU->getSkeleton())
       TheU = Skeleton;
-    unsigned ID = TheU->getUniqueID();
 
     // Start the dwarf pubnames section.
     Asm->OutStreamer.SwitchSection(PSec);
 
     // Emit the header.
     Asm->OutStreamer.AddComment("Length of Public " + Name + " Info");
-    MCSymbol *BeginLabel = Asm->GetTempSymbol("pub" + Name + "_begin", ID);
-    MCSymbol *EndLabel = Asm->GetTempSymbol("pub" + Name + "_end", ID);
+    MCSymbol *BeginLabel = Asm->createTempSymbol("pub" + Name + "_begin");
+    MCSymbol *EndLabel = Asm->createTempSymbol("pub" + Name + "_end");
     Asm->EmitLabelDifference(EndLabel, BeginLabel, 4);
 
     Asm->OutStreamer.EmitLabel(BeginLabel);
@@ -1523,7 +1431,7 @@ void DwarfDebug::emitDebugPubSection(
     Asm->EmitInt16(dwarf::DW_PUBNAMES_VERSION);
 
     Asm->OutStreamer.AddComment("Offset of Compilation Unit Info");
-    Asm->EmitSectionOffset(TheU->getLabelBegin(), TheU->getSectionSym());
+    Asm->emitSectionOffset(TheU->getLabelBegin());
 
     Asm->OutStreamer.AddComment("Compilation Unit Length");
     Asm->EmitInt32(TheU->getLength());
@@ -1584,9 +1492,9 @@ static void emitDebugLocValue(const AsmPrinter &AP,
                               const DebugLocEntry::Value &Value,
                               unsigned PieceOffsetInBits) {
   DIVariable DV = Value.getVariable();
-  DebugLocDwarfExpression DwarfExpr(
-      *AP.TM.getSubtargetImpl()->getRegisterInfo(),
-      AP.getDwarfDebug()->getDwarfVersion(), Streamer);
+  DebugLocDwarfExpression DwarfExpr(*AP.MF->getSubtarget().getRegisterInfo(),
+                                    AP.getDwarfDebug()->getDwarfVersion(),
+                                    Streamer);
   // Regular entry.
   if (Value.isInt()) {
     DIBasicType BTy(DV.getType().resolve(TypeIdentifierMap));
@@ -1637,9 +1545,9 @@ void DebugLocEntry::finalize(const AsmPrinter &AP,
       assert(Offset <= PieceOffset && "overlapping or duplicate pieces");
       if (Offset < PieceOffset) {
         // The DWARF spec seriously mandates pieces with no locations for gaps.
-        DebugLocDwarfExpression Expr(
-            *AP.TM.getSubtargetImpl()->getRegisterInfo(),
-            AP.getDwarfDebug()->getDwarfVersion(), Streamer);
+        DebugLocDwarfExpression Expr(*AP.MF->getSubtarget().getRegisterInfo(),
+                                     AP.getDwarfDebug()->getDwarfVersion(),
+                                     Streamer);
         Expr.AddOpPiece(PieceOffset-Offset, 0);
         Offset += PieceOffset-Offset;
       }
@@ -1750,24 +1658,15 @@ void DwarfDebug::emitDebugARanges() {
   }
 
   // Add terminating symbols for each section.
-  unsigned ID = 0;
   for (const auto &I : SectionMap) {
     const MCSection *Section = I.first;
     MCSymbol *Sym = nullptr;
 
-    if (Section) {
-      // We can't call MCSection::getLabelEndName, as it's only safe to do so
-      // if we know the section name up-front. For user-created sections, the
-      // resulting label may not be valid to use as a label. (section names can
-      // use a greater set of characters on some systems)
-      Sym = Asm->GetTempSymbol("debug_end", ID);
-      Asm->OutStreamer.SwitchSection(Section);
-      Asm->OutStreamer.EmitLabel(Sym);
-    }
+    if (Section)
+      Sym = Asm->OutStreamer.endSection(Section);
 
     // Insert a final terminator.
     SectionMap[Section].push_back(SymbolCU(nullptr, Sym));
-    ++ID;
   }
 
   DenseMap<DwarfCompileUnit *, std::vector<ArangeSpan>> Spans;
@@ -1871,7 +1770,7 @@ void DwarfDebug::emitDebugARanges() {
     Asm->OutStreamer.AddComment("DWARF Arange version number");
     Asm->EmitInt16(dwarf::DW_ARANGES_VERSION);
     Asm->OutStreamer.AddComment("Offset Into Debug Info Section");
-    Asm->EmitSectionOffset(CU->getLabelBegin(), CU->getSectionSym());
+    Asm->emitSectionOffset(CU->getLabelBegin());
     Asm->OutStreamer.AddComment("Address Size (in bytes)");
     Asm->EmitInt8(PtrSize);
     Asm->OutStreamer.AddComment("Segment Size (in bytes)");
@@ -1967,10 +1866,9 @@ DwarfCompileUnit &DwarfDebug::constructSkeletonCU(const DwarfCompileUnit &CU) {
   auto OwnedUnit = make_unique<DwarfCompileUnit>(
       CU.getUniqueID(), CU.getCUNode(), Asm, this, &SkeletonHolder);
   DwarfCompileUnit &NewCU = *OwnedUnit;
-  NewCU.initSection(Asm->getObjFileLowering().getDwarfInfoSection(),
-                    DwarfInfoSectionSym);
+  NewCU.initSection(Asm->getObjFileLowering().getDwarfInfoSection());
 
-  NewCU.initStmtList(DwarfLineSectionSym);
+  NewCU.initStmtList();
 
   initSkeletonUnit(CU, NewCU.getUnitDie(), std::move(OwnedUnit));
 
@@ -1981,9 +1879,8 @@ DwarfCompileUnit &DwarfDebug::constructSkeletonCU(const DwarfCompileUnit &CU) {
 // compile units that would normally be in debug_info.
 void DwarfDebug::emitDebugInfoDWO() {
   assert(useSplitDwarf() && "No split dwarf debug info?");
-  // Don't pass an abbrev symbol, using a constant zero instead so as not to
-  // emit relocations into the dwo file.
-  InfoHolder.emitUnits(/* AbbrevSymbol */ nullptr);
+  // Don't emit relocations into the dwo file.
+  InfoHolder.emitUnits(/* UseOffsets */ true);
 }
 
 // Emit the .debug_abbrev.dwo section for separated dwarf. This contains the
