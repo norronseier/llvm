@@ -66,10 +66,10 @@ namespace {
     bool isInvariantForGLICM(Value *V, Loop *OuterLoop);
     void replaceScalarsWithArrays(unsigned TripCount);
     bool isUsedInOriginalLoop(Instruction *I);
-    void replaceUsesWithValueInArray(Instruction *I, Value *Arr, Value *Index);
+    void replaceUsesWithValueInArray(Instruction *I, AllocaInst *Arr, Value *Index);
     AllocaInst *createTemporaryArray(Instruction *I, Constant *Size,
                                      BasicBlock* BB);
-    void storeInstructionInArray(Instruction *I, Value *Arr, Value *Index);
+    void storeInstructionInArray(Instruction *I, AllocaInst *Arr, Value *Index);
   };
 }
 
@@ -140,9 +140,6 @@ bool GLICM::runOnLoop(Loop *L, LPPassManager &LPM) {
       TripCount > 0))
     return Changed;
 
-  if (counter++ > 0)
-    return Changed;
-
   createMirrorLoop(ParentLoop, TripCount);
   generalizedHoist(DT->getNode(L->getHeader()), &SafetyInfo);
   replaceScalarsWithArrays(TripCount);
@@ -184,7 +181,7 @@ void GLICM::createMirrorLoop(Loop *L, unsigned TripCount) {
   // Insert a cmp instruction between the induction variable and the known trip
   // count. Insert the instruction at the end of the latch BasicBlock.
   CmpInst *CmpInst =
-      CmpInst::Create(Instruction::ICmp, CmpInst::ICMP_SLE, NextIndVar,
+      CmpInst::Create(Instruction::ICmp, CmpInst::ICMP_SLT, NextIndVar,
                       ConstantInt::getSigned(NextIndVar->getType(), TripCount),
                       NewLoopIndVarName + Twine(".cmp"),
                       NewLoopLatch->getTerminator());
@@ -338,7 +335,7 @@ bool GLICM::isUsedInOriginalLoop(Instruction *I) {
 }
 
 // Replaces uses of I in CurLoop with Arr[Index].
-void GLICM::replaceUsesWithValueInArray(Instruction *I, Value *Arr,
+void GLICM::replaceUsesWithValueInArray(Instruction *I, AllocaInst *Arr,
                                         Value *Index) {
     SmallVector<Value*, 8> GEPIndices;
     GEPIndices.push_back(Index);
@@ -346,7 +343,7 @@ void GLICM::replaceUsesWithValueInArray(Instruction *I, Value *Arr,
     BasicBlock *BB = CurLoop->getHeader();
     // Insert a GEP instruction at the beginning of BB.
     GetElementPtrInst *GEP =
-        GetElementPtrInst::Create(Arr, GEPIndices,
+        GetElementPtrInst::Create(Arr->getAllocatedType(), Arr, GEPIndices,
                                   "glicm.arrayidx." + Twine(InstrIndex++),
                                   BB->getFirstNonPHI());
 
@@ -375,12 +372,14 @@ AllocaInst *GLICM::createTemporaryArray(Instruction *I, Constant *Size,
 }
 
 // Stores I in Arr at index Index.
-void GLICM::storeInstructionInArray(Instruction *I, Value *Arr, Value *Index) {
+void GLICM::storeInstructionInArray(Instruction *I, AllocaInst *Arr,
+                                    Value *Index) {
   SmallVector<Value*, 8> GEPIndices;
   GEPIndices.push_back(Index);
+
   // First compute the address at which to store I using a GEP instruction.
   GetElementPtrInst *GEP =
-      GetElementPtrInst::Create(Arr, GEPIndices,
+      GetElementPtrInst::Create(Arr->getAllocatedType(), Arr, GEPIndices,
                                 "glicm.arrayidx." + Twine(InstrIndex++), I);
 
   // Workaround: we need to specify a location for S when we create it, but the
