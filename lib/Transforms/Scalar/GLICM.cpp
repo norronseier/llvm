@@ -24,6 +24,7 @@ static bool hoist(Instruction *I, BasicBlock *InsertionBlock);
 static void replaceIndVarOperand(Instruction *I, PHINode *Old, PHINode *New);
 static bool inSubLoop(BasicBlock *BB, Loop *CurLoop, LoopInfo *LI);
 static bool isUsedOutsideOfLoop(Instruction *I, Loop *L, LoopInfo *LI);
+static bool loopMayThrow(Loop *L, Loop *CurLoop, LoopInfo *LI);
 
 namespace {
   struct GLICM : public LoopPass {
@@ -43,6 +44,7 @@ namespace {
     }
 
   private:
+    // TODO: Add documentation for fields and functions.
     int counter = 0;
     long InstrIndex = 0;
 
@@ -70,6 +72,7 @@ namespace {
     AllocaInst *createTemporaryArray(Instruction *I, Constant *Size,
                                      BasicBlock* BB);
     void storeInstructionInArray(Instruction *I, AllocaInst *Arr, Value *Index);
+    bool isGLICMProfitable(LICMSafetyInfo *SafetyInfo);
   };
 }
 
@@ -94,12 +97,10 @@ bool GLICM::runOnLoop(Loop *L, LPPassManager &LPM) {
   unsigned TripCount = SCEV->getSmallConstantTripCount(L);
   IndVar = L->getCanonicalInductionVariable();
   ParentLoop = L->getParentLoop();
+  bool ParentLoopMayThrow = false;
 
-  // Compute Loop safety information.
-  // FIXME: This function computes LICM safety info for the pre-header of the
-  // inspected loop. We want instead to check the pre-header of the parent loop.
-  LICMSafetyInfo SafetyInfo;
-  computeLICMSafetyInfo(&SafetyInfo, CurLoop);
+  if (ParentLoop)
+    ParentLoopMayThrow = loopMayThrow(ParentLoop, CurLoop, LI);
 
   // Compute the Alias Set Tracker.
   CurAST = new AliasSetTracker(*AA);
@@ -137,11 +138,22 @@ bool GLICM::runOnLoop(Loop *L, LPPassManager &LPM) {
   // 2) they have a parent loop which is in loop simplify form (to ensure the
   //    loop has a valid pre-header)
   if (!(ParentLoop && ParentLoop->isLoopSimplifyForm() && IndVar &&
-      TripCount > 0))
+      TripCount > 0 && !ParentLoopMayThrow))
     return Changed;
 
-  createMirrorLoop(ParentLoop, TripCount);
-  generalizedHoist(DT->getNode(L->getHeader()), &SafetyInfo);
+  // Compute Loop safety information for CurLoop.
+  LICMSafetyInfo CurLoopSafetyInfo;
+  computeLICMSafetyInfo(&CurLoopSafetyInfo, CurLoop);
+
+//  isGLICMProfitable(&CurLoopSafetyInfo);
+  // Clone the current loop in the preheader of its parent loop.
+   createMirrorLoop(ParentLoop, TripCount);
+
+  // Move appropriate instructions from the original loop to the cloned loop.
+  generalizedHoist(DT->getNode(L->getHeader()), &CurLoopSafetyInfo);
+
+  // Replace uses of the hoisted instructions in the original loop with uses of
+  // results loaded from temporary arrays.
   replaceScalarsWithArrays(TripCount);
   return true;
 }
@@ -285,9 +297,9 @@ bool GLICM::isInvariantForGLICM(Value *V, Loop *OuterLoop) {
 void GLICM::replaceScalarsWithArrays(unsigned TripCount) {
 
   std::vector<Instruction*> InstrUsedOutsideLoop;
-  // Construct a list of all the instructions in the cloned that are used in the
-  // original. These will need to be stored in temporary arrays and their uses
-  // replaced.
+  // Construct a list of all the instructions in the cloned loop that are used
+  // in the original. These will need to be stored in temporary arrays and their
+  // uses replaced.
   for (BasicBlock::iterator II = NewLoopHeader->begin(),
        E = NewLoopHeader->end(); II != E; ) {
     Instruction &I = *II++;
@@ -391,6 +403,29 @@ void GLICM::storeInstructionInArray(Instruction *I, AllocaInst *Arr,
   S->insertAfter(I);
 }
 
+bool GLICM::isGLICMProfitable(LICMSafetyInfo *SafetyInfo) {
+  // bool Profitable = true;
+
+  std::set<Instruction*> HoistableInstr;
+  for (Loop::block_iterator BB = CurLoop->block_begin(),
+       BBE = CurLoop->block_end(); (BB != BBE); ++BB)
+    for (BasicBlock::iterator I = (*BB)->begin(), E = (*BB)->end(); (I != E);
+         ++I) {
+      Instruction &Instr = *I;
+      if ((hasLoopInvariantOperands(&Instr, ParentLoop)) &&
+//            (!HoistableInstr.empty() &&
+//             !hasLoopInvariantOperands(&Instr, ParentLoop) &&
+//             HoistableInstr.find(&Instr) != HoistableInstr.end())) &&
+          canSinkOrHoistInst(Instr, AA, DT, CurLoop, CurAST, SafetyInfo) &&
+          isSafeToExecuteUnconditionally(Instr, DT, CurLoop, SafetyInfo) &&
+          !isUsedOutsideOfLoop(&Instr, CurLoop, LI)) {
+        dbgs() << "Adding " << Instr << "\n";
+        HoistableInstr.insert(&Instr);
+      }
+    }
+  dbgs() << "Size of hoistable instruction set: " << HoistableInstr.size() << "\n";
+}
+
 static bool hoist(Instruction *I, BasicBlock *InsertionBlock) {
   I->moveBefore(InsertionBlock->getTerminator());
   NumHoisted++;
@@ -415,4 +450,27 @@ static bool isUsedOutsideOfLoop(Instruction *I, Loop *L, LoopInfo *LI) {
       if (LI->getLoopFor(UserI->getParent()) != L)
         return true;
   return false;
+}
+
+static bool loopMayThrow(Loop *L, Loop *CurLoop, LoopInfo *LI) {
+  bool MayThrow = false;
+
+  // Check if any instruction within L which does not belong to CurLoop may
+  // throw. If yes, then we cannot hoist instructions from CurLoop to L's
+  // preheader, because exceptions thrown by instructions of L may prevent
+  // that instruction from executing.
+
+  // This is a coarse-grained check, similar to what LICM does in the
+  // computeLICMSafetyInfo function. More refined checks are possible, such as
+  // checking whether the throwing instructions appear before or after the
+  // current loop. With this conservative approach, if there are any
+  // instructions that may throw in the L loop, this function will return false.
+  for (Loop::block_iterator BB = L->block_begin(),
+       BBE = L->block_end(); (BB != BBE) && !MayThrow ; ++BB)
+    if (LI->getLoopFor(*BB) != CurLoop)
+      for (BasicBlock::iterator I = (*BB)->begin(), E = (*BB)->end();
+           (I != E) && !MayThrow; ++I)
+        MayThrow |= I->mayThrow();
+
+  return MayThrow;
 }
