@@ -2065,6 +2065,12 @@ bool X86FastISel::X86SelectSelect(const Instruction *I) {
 }
 
 bool X86FastISel::X86SelectSIToFP(const Instruction *I) {
+  // The target-independent selection algorithm in FastISel already knows how
+  // to select a SINT_TO_FP if the target is SSE but not AVX.
+  // Early exit if the subtarget doesn't have AVX.
+  if (!Subtarget->hasAVX())
+    return false;
+
   if (!I->getOperand(0)->getType()->isIntegerTy(32))
     return false;
 
@@ -2086,11 +2092,6 @@ bool X86FastISel::X86SelectSIToFP(const Instruction *I) {
     RC = &X86::FR32RegClass;
   } else
     return false;
-
-  // The target-independent selection algorithm in FastISel already knows how
-  // to select a SINT_TO_FP if the target is SSE but not AVX. This code is only
-  // reachable if the subtarget has AVX.
-  assert(Subtarget->hasAVX() && "Expected a subtarget with AVX!");
 
   unsigned ImplicitDefReg = createResultReg(RC);
   BuildMI(*FuncInfo.MBB, FuncInfo.InsertPt, DbgLoc,
@@ -2417,6 +2418,8 @@ bool X86FastISel::fastLowerIntrinsicCall(const IntrinsicInst *II) {
     const MCInstrDesc &II = TII.get(TargetOpcode::DBG_VALUE);
     // FIXME may need to add RegState::Debug to any registers produced,
     // although ESP/EBP should be the only ones at the moment.
+    assert(DI->getVariable()->isValidLocationForIntrinsic(DbgLoc) &&
+           "Expected inlined-at fields to agree");
     addFullAddress(BuildMI(*FuncInfo.MBB, FuncInfo.InsertPt, DbgLoc, II), AM)
         .addImm(0)
         .addMetadata(DI->getVariable())

@@ -1637,6 +1637,10 @@ multiclass AddSub<bit isSub, string mnemonic,
                   SDPatternOperator OpNode = null_frag> {
   let hasSideEffects = 0, isReMaterializable = 1, isAsCheapAsAMove = 1 in {
   // Add/Subtract immediate
+  // Increase the weight of the immediate variant to try to match it before
+  // the extended register variant.
+  // We used to match the register variant before the immediate when the
+  // register argument could be implicitly zero-extended.
   let AddedComplexity = 6 in
   def Wri  : BaseAddSubImm<isSub, 0, GPR32sp, GPR32sp, addsub_shifted_imm32,
                            mnemonic, OpNode> {
@@ -3284,6 +3288,10 @@ class LoadStoreExclusiveSimple<bits<2> sz, bit o2, bit L, bit o1, bit o0,
     : BaseLoadStoreExclusive<sz, o2, L, o1, o0, oops, iops, asm, operands> {
   bits<5> Rt;
   bits<5> Rn;
+  let Inst{20-16} = 0b11111;
+  let Unpredictable{20-16} = 0b11111;
+  let Inst{14-10} = 0b11111;
+  let Unpredictable{14-10} = 0b11111;
   let Inst{9-5} = Rn;
   let Inst{4-0} = Rt;
 
@@ -5918,7 +5926,7 @@ multiclass SIMDIns {
     let Inst{20-18} = idx;
     let Inst{17-16} = 0b10;
     let Inst{14-12} = idx2;
-    let Inst{11} = 0;
+    let Inst{11} = {?};
   }
   def vi32lane : SIMDInsFromElement<".s", v4i32, i32, VectorIndexS> {
     bits<2> idx;
@@ -5926,7 +5934,7 @@ multiclass SIMDIns {
     let Inst{20-19} = idx;
     let Inst{18-16} = 0b100;
     let Inst{14-13} = idx2;
-    let Inst{12-11} = 0;
+    let Inst{12-11} = {?,?};
   }
   def vi64lane : SIMDInsFromElement<".d", v2i64, i64, VectorIndexD> {
     bits<1> idx;
@@ -5934,7 +5942,7 @@ multiclass SIMDIns {
     let Inst{20} = idx;
     let Inst{19-16} = 0b1000;
     let Inst{14} = idx2;
-    let Inst{13-11} = 0;
+    let Inst{13-11} = {?,?,?};
   }
 
   // For all forms of the INS instruction, the "mov" mnemonic is the
