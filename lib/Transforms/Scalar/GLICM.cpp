@@ -40,6 +40,7 @@ namespace {
       AU.addRequired<DominatorTreeWrapperPass>();
       AU.addRequired<LoopInfoWrapperPass>();
       AU.addRequired<ScalarEvolution>();
+      AU.addRequiredID(LCSSAID);
       AU.addRequiredID(LoopSimplifyID);
     }
 
@@ -81,13 +82,15 @@ INITIALIZE_PASS_BEGIN(GLICM, "glicm", "GLICM", false, false)
 INITIALIZE_PASS_DEPENDENCY(DominatorTreeWrapperPass)
 INITIALIZE_PASS_DEPENDENCY(LoopInfoWrapperPass)
 INITIALIZE_PASS_DEPENDENCY(LoopSimplify)
+INITIALIZE_PASS_DEPENDENCY(LCSSA)
 INITIALIZE_PASS_DEPENDENCY(ScalarEvolution)
 INITIALIZE_AG_DEPENDENCY(AliasAnalysis)
 INITIALIZE_PASS_END(GLICM, "glicm", "GLICM", false, false)
 
+Pass *llvm::createGLICMPass() { return new GLICM(); }
+
 bool GLICM::runOnLoop(Loop *L, LPPassManager &LPM) {
   bool Changed = false;
-  dbgs() << "In " << L->getHeader()->getName() << "\n";
   ScalarEvolution *SCEV = &getAnalysis<ScalarEvolution>();
   DT = &getAnalysis<DominatorTreeWrapperPass>().getDomTree();
   LI = &getAnalysis<LoopInfoWrapperPass>().getLoopInfo();
@@ -124,9 +127,16 @@ bool GLICM::runOnLoop(Loop *L, LPPassManager &LPM) {
       CurAST->add(*BB);
   }
 
-  if (L->getParentLoop())
+  // Add BB's from the parent loop to the alias set tracker.
+  if (ParentLoop) {
+    for (Loop::block_iterator I = ParentLoop->block_begin(),
+         E = ParentLoop->block_end(); I != E; ++I) {
+      BasicBlock *BB = *I;
+      if (LI->getLoopFor(BB) != L)
+        CurAST->add(*BB);
+    }
     LoopToAliasSetMap[L] = CurAST;
-  else
+  } else
     delete CurAST;
 
   // Apply generalized loop-invariant code motion to loops that satisfy all the
@@ -138,16 +148,20 @@ bool GLICM::runOnLoop(Loop *L, LPPassManager &LPM) {
   // 2) they have a parent loop which is in loop simplify form (to ensure the
   //    loop has a valid pre-header)
   if (!(ParentLoop && ParentLoop->isLoopSimplifyForm() && IndVar &&
-      TripCount > 0 && !ParentLoopMayThrow))
+      TripCount > 0 && !ParentLoopMayThrow)) {
+    dbgs() << "Skipping " << L->getHeader()->getName() << " ";
+    dbgs() << "Parent may throw" << ParentLoopMayThrow << " ";
     return Changed;
+  }
 
+  dbgs() << "GLICM to be applied in loop with header " << L->getHeader()->getName() << "\n";
+  // dbgs() << "Loop tripcount is " << TripCount << "\n";
   // Compute Loop safety information for CurLoop.
   LICMSafetyInfo CurLoopSafetyInfo;
   computeLICMSafetyInfo(&CurLoopSafetyInfo, CurLoop);
 
-//  isGLICMProfitable(&CurLoopSafetyInfo);
   // Clone the current loop in the preheader of its parent loop.
-   createMirrorLoop(ParentLoop, TripCount);
+  createMirrorLoop(ParentLoop, TripCount);
 
   // Move appropriate instructions from the original loop to the cloned loop.
   generalizedHoist(DT->getNode(L->getHeader()), &CurLoopSafetyInfo);
@@ -248,11 +262,17 @@ bool GLICM::generalizedHoist(DomTreeNode* N, LICMSafetyInfo *SafetyInfo) {
       // bool i3 = isSafeToExecuteUnconditionally(I, DT, CurLoop, SafetyInfo);
       // dbgs() << i1 << " " << i2 << " " << i3 << "\n";
       // if (i1 && i2 && i3) {
+      //dbgs() << "[Can be hoisted = " << canSinkOrHoistInst(I, AA, DT, CurLoop, CurAST, SafetyInfo) <<
+        //      "] : Instruction: " << I << "\n";
       if (hasLoopInvariantOperands(&I, ParentLoop) &&
           canSinkOrHoistInst(I, AA, DT, CurLoop, CurAST, SafetyInfo) &&
           isSafeToExecuteUnconditionally(I, DT, CurLoop, SafetyInfo) &&
           !isUsedOutsideOfLoop(&I, CurLoop, LI)) {
-        dbgs() << "[GLICM] H: " << I << "\n";
+        // dbgs() << "GLICM is hoisting the following instruction: " << I << "\n";
+        // dbgs() << "The loop canonical indvar is: " << *IndVar << "\n";
+        // dbgs() << "The loop is: \n" << *CurLoop << "\n";
+        // dbgs() << "The current BB: " << *BB << "\n";
+        // dbgs() << "*****************************************************\n";
         Changed |= hoist(&I, NewLoopHeader);
         replaceIndVarOperand(&I, IndVar, NewLoopIndVar);
       }
@@ -469,8 +489,11 @@ static bool loopMayThrow(Loop *L, Loop *CurLoop, LoopInfo *LI) {
        BBE = L->block_end(); (BB != BBE) && !MayThrow ; ++BB)
     if (LI->getLoopFor(*BB) != CurLoop)
       for (BasicBlock::iterator I = (*BB)->begin(), E = (*BB)->end();
-           (I != E) && !MayThrow; ++I)
+           (I != E) && !MayThrow; ++I) {
+        if (I->mayThrow())
+          dbgs() << "Throwing instr: " << *I << "\n";
         MayThrow |= I->mayThrow();
+      }
 
   return MayThrow;
 }

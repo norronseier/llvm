@@ -140,6 +140,12 @@ Pass *createLICMPass();
 
 //===----------------------------------------------------------------------===//
 //
+// GLICM - This pass is a generalized version of LICM above.
+//
+Pass *createGLICMPass();
+
+//===----------------------------------------------------------------------===//
+//
 // LoopInterchange - This pass interchanges loops to provide a more
 // cache-friendly memory access patterns.
 //
