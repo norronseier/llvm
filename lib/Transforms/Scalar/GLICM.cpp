@@ -73,7 +73,9 @@ namespace {
     AllocaInst *createTemporaryArray(Instruction *I, Constant *Size,
                                      BasicBlock* BB);
     void storeInstructionInArray(Instruction *I, AllocaInst *Arr, Value *Index);
-    bool isGLICMProfitable(LICMSafetyInfo *SafetyInfo);
+    bool isProfitableToHoist(Instruction *I, LICMSafetyInfo *SafetyInfo);
+    bool hasLoopInvariantOperandsApartFrom(Instruction *I, Loop *OuterLoop,
+                                           Value *V);
   };
 }
 
@@ -160,12 +162,12 @@ bool GLICM::runOnLoop(Loop *L, LPPassManager &LPM) {
   createMirrorLoop(ParentLoop, TripCount);
 
   // Move appropriate instructions from the original loop to the cloned loop.
-  generalizedHoist(DT->getNode(L->getHeader()), &CurLoopSafetyInfo);
+  Changed = generalizedHoist(DT->getNode(L->getHeader()), &CurLoopSafetyInfo);
 
   // Replace uses of the hoisted instructions in the original loop with uses of
   // results loaded from temporary arrays.
   replaceScalarsWithArrays(TripCount);
-  return true;
+  return Changed;
 }
 
 // Creates an empty loop with the same iteration space as CurLoop in the
@@ -242,8 +244,8 @@ bool GLICM::generalizedHoist(DomTreeNode* N, LICMSafetyInfo *SafetyInfo) {
 
   if (!CurLoop->contains(BB))
     return Changed;
-  if (CurLoop->getLoopLatch() == BB)
-    return Changed;
+  //if (CurLoop->getLoopLatch() == BB)
+  //  return Changed;
 
   if (!inSubLoop(BB, CurLoop, LI))
     for (BasicBlock::iterator II = BB->begin(), E = BB->end(); II != E; ) {
@@ -263,12 +265,10 @@ bool GLICM::generalizedHoist(DomTreeNode* N, LICMSafetyInfo *SafetyInfo) {
       if (hasLoopInvariantOperands(&I, ParentLoop) &&
           canSinkOrHoistInst(I, AA, DT, CurLoop, CurAST, SafetyInfo) &&
           isSafeToExecuteUnconditionally(I, DT, CurLoop, SafetyInfo) &&
-          !isUsedOutsideOfLoop(&I, CurLoop, LI)) {
-        // dbgs() << "GLICM is hoisting the following instruction: " << I << "\n";
-        // dbgs() << "The loop canonical indvar is: " << *IndVar << "\n";
-        // dbgs() << "The loop is: \n" << *CurLoop << "\n";
-        // dbgs() << "The current BB: " << *BB << "\n";
-        // dbgs() << "*****************************************************\n";
+          !isUsedOutsideOfLoop(&I, CurLoop, LI) &&
+          isProfitableToHoist(&I, SafetyInfo)) {
+//        dbgs() << "Instruction " << I << " will be hoisted. ";
+//        dbgs() << "Any user hoistable? " << isProfitableToHoist(&I, SafetyInfo) << "\n";
         Changed |= hoist(&I, NewLoopHeader);
         replaceIndVarOperand(&I, IndVar, NewLoopIndVar);
       }
@@ -285,6 +285,17 @@ bool GLICM::hasLoopInvariantOperands(Instruction *I, Loop *OuterLoop) {
   for (unsigned i = 0, e = I->getNumOperands(); i != e; ++i)
     if (!isInvariantForGLICM(I->getOperand(i), OuterLoop))
       return false;
+
+  return true;
+}
+
+bool GLICM::hasLoopInvariantOperandsApartFrom(Instruction *I, Loop *OuterLoop,
+                                              Value *V) {
+  for (unsigned i = 0, e = I->getNumOperands(); i != e; i++) {
+    Value *Op = I->getOperand(i);
+    if (!isInvariantForGLICM(Op, OuterLoop) && Op != V)
+      return false;
+  }
 
   return true;
 }
@@ -382,7 +393,8 @@ void GLICM::replaceUsesWithValueInArray(Instruction *I, AllocaInst *Arr,
     Load->removeFromParent();
     Load->insertAfter(GEP);
 
-    // Replace all uses of I in BB with Arr[Index].
+    // Replace all uses of I outside the header of the cloned loop with
+    // Arr[Index].
     I->replaceUsesOutsideBlock(Load, NewLoopHeader);
 }
 
@@ -416,27 +428,23 @@ void GLICM::storeInstructionInArray(Instruction *I, AllocaInst *Arr,
   S->insertAfter(I);
 }
 
-bool GLICM::isGLICMProfitable(LICMSafetyInfo *SafetyInfo) {
-  // bool Profitable = true;
+bool GLICM::isProfitableToHoist(Instruction *Instr, LICMSafetyInfo *SafetyInfo) {
+  bool anyUserHoistable = false;
 
-  std::set<Instruction*> HoistableInstr;
-  for (Loop::block_iterator BB = CurLoop->block_begin(),
-       BBE = CurLoop->block_end(); (BB != BBE); ++BB)
-    for (BasicBlock::iterator I = (*BB)->begin(), E = (*BB)->end(); (I != E);
-         ++I) {
-      Instruction &Instr = *I;
-      if ((hasLoopInvariantOperands(&Instr, ParentLoop)) &&
-//            (!HoistableInstr.empty() &&
-//             !hasLoopInvariantOperands(&Instr, ParentLoop) &&
-//             HoistableInstr.find(&Instr) != HoistableInstr.end())) &&
-          canSinkOrHoistInst(Instr, AA, DT, CurLoop, CurAST, SafetyInfo) &&
-          isSafeToExecuteUnconditionally(Instr, DT, CurLoop, SafetyInfo) &&
-          !isUsedOutsideOfLoop(&Instr, CurLoop, LI)) {
-        dbgs() << "Adding " << Instr << "\n";
-        HoistableInstr.insert(&Instr);
-      }
+  for (User *U : Instr->users())
+    if (Instruction *I = dyn_cast<Instruction>(U)) {
+      // This instruction is used by the induction variable's PHI node, and
+      // so don't hoist it.
+      if (I == IndVar)
+        return false;
+      anyUserHoistable |=
+        (hasLoopInvariantOperandsApartFrom(I, ParentLoop, Instr) &&
+         canSinkOrHoistInst(*I, AA, DT, CurLoop, CurAST, SafetyInfo) &&
+         isSafeToExecuteUnconditionally(*I, DT, CurLoop, SafetyInfo) &&
+         !isUsedOutsideOfLoop(I, CurLoop, LI));
     }
-  dbgs() << "Size of hoistable instruction set: " << HoistableInstr.size() << "\n";
+
+  return anyUserHoistable;
 }
 
 static bool hoist(Instruction *I, BasicBlock *InsertionBlock) {
