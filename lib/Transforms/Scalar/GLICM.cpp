@@ -149,13 +149,9 @@ bool GLICM::runOnLoop(Loop *L, LPPassManager &LPM) {
   //    loop has a valid pre-header)
   if (!(ParentLoop && ParentLoop->isLoopSimplifyForm() && IndVar &&
       TripCount > 0 && !ParentLoopMayThrow)) {
-    dbgs() << "Skipping " << L->getHeader()->getName() << " ";
-    dbgs() << "Parent may throw" << ParentLoopMayThrow << " ";
     return Changed;
   }
 
-  dbgs() << "GLICM to be applied in loop with header " << L->getHeader()->getName() << "\n";
-  // dbgs() << "Loop tripcount is " << TripCount << "\n";
   // Compute Loop safety information for CurLoop.
   LICMSafetyInfo CurLoopSafetyInfo;
   computeLICMSafetyInfo(&CurLoopSafetyInfo, CurLoop);
@@ -387,10 +383,7 @@ void GLICM::replaceUsesWithValueInArray(Instruction *I, AllocaInst *Arr,
     Load->insertAfter(GEP);
 
     // Replace all uses of I in BB with Arr[Index].
-    for (User *U : I->users())
-      if (Instruction *UserI = dyn_cast<Instruction>(U))
-        if (LI->getLoopFor(UserI->getParent()) == CurLoop)
-          UserI->replaceUsesOfWith(I, Load);
+    I->replaceUsesOutsideBlock(Load, NewLoopHeader);
 }
 
 // Allocates an array of size Size at the end of BB.
