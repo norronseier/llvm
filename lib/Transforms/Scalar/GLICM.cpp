@@ -58,10 +58,10 @@ namespace {
     Loop *CurLoop;
     Loop *ParentLoop;
     PHINode *IndVar;
-    PHINode *NewLoopIndVar;
-    BasicBlock *NewLoopHeader;
-    BasicBlock *NewLoopLatch;
-    BasicBlock *NewLoopPreheader;
+    PHINode *ClonedLoopIndVar;
+    BasicBlock *ClonedLoopHeader;
+    BasicBlock *ClonedLoopLatch;
+    BasicBlock *ClonedLoopPreheader;
 
     void createMirrorLoop(Loop *L, unsigned TripCount);
     bool generalizedHoist(DomTreeNode *N, LICMSafetyInfo *SafetyInfo);
@@ -76,8 +76,7 @@ namespace {
     bool isProfitableToHoist(Instruction *I, LICMSafetyInfo *SafetyInfo);
     bool hasLoopInvariantOperandsApartFrom(Instruction *I, Loop *OuterLoop,
                                            Value *V);
-    bool shouldHoist(Instruction *I, LICMSafetyInfo *SafetyInfo, Value *V,
-                     bool ProfitabilityMatters);
+    bool shouldHoist(Instruction *I, LICMSafetyInfo *SafetyInfo, Value *V);
   };
 }
 
@@ -172,8 +171,8 @@ bool GLICM::runOnLoop(Loop *L, LPPassManager &LPM) {
   return Changed;
 }
 
-// Creates an empty loop with the same iteration space as CurLoop in the
-// pre-header of loop L.
+/// Creates an empty loop with the same iteration space as CurLoop in the
+/// pre-header of loop L.
 void GLICM::createMirrorLoop(Loop *L, unsigned TripCount) {
   BasicBlock *Header = L->getHeader();
   BasicBlock *Preheader = L->getLoopPreheader();
@@ -181,65 +180,67 @@ void GLICM::createMirrorLoop(Loop *L, unsigned TripCount) {
     return;
 
   // Create a header and a latch for the new loop.
-  NewLoopHeader = SplitEdge(Preheader, Header, DT, LI);
-  NewLoopLatch = SplitEdge(NewLoopHeader, Header, DT, LI);
+  ClonedLoopHeader = SplitEdge(Preheader, Header, DT, LI);
+  ClonedLoopLatch = SplitEdge(ClonedLoopHeader, Header, DT, LI);
 
   StringRef CurLoopRootName = CurLoop->getHeader()->getName();
-  NewLoopHeader->setName(CurLoopRootName + Twine(".gcm.1"));
-  NewLoopLatch->setName(CurLoopRootName + Twine(".gcm.2"));
-  NewLoopPreheader = NewLoopHeader->getUniquePredecessor();
+  ClonedLoopHeader->setName(CurLoopRootName + Twine(".gcm.1"));
+  ClonedLoopLatch->setName(CurLoopRootName + Twine(".gcm.2"));
+  ClonedLoopPreheader = ClonedLoopHeader->getUniquePredecessor();
 
-  // Add a new PHINode at the end of NewLoopHeader. This node corresponds to
+  // Add a new PHINode at the end of ClonedLoopHeader. This node corresponds to
   // the induction variable of the new (cloned) loop.
-  Twine NewLoopIndVarName = IndVar->getName() + Twine(".gcm");
-  NewLoopIndVar = PHINode::Create(IndVar->getType(), 2, NewLoopIndVarName,
-                                  NewLoopHeader->getTerminator());
+  Twine ClonedLoopIndVarName = IndVar->getName() + Twine(".gcm");
+  ClonedLoopIndVar = PHINode::Create(IndVar->getType(), 2, ClonedLoopIndVarName,
+                                  ClonedLoopHeader->getTerminator());
 
   // Increment the induction variable by 1. Insert the instruction at the end of
   // the latch BasicBlock.
   BinaryOperator *NextIndVar =
-      BinaryOperator::CreateAdd(NewLoopIndVar,
-                                ConstantInt::getSigned(NewLoopIndVar->getType(),
+      BinaryOperator::CreateAdd(ClonedLoopIndVar,
+                                ConstantInt::getSigned(ClonedLoopIndVar->getType(),
                                                        1),
-                                NewLoopIndVarName + Twine(".inc"),
-                                NewLoopLatch->getTerminator());
+                                ClonedLoopIndVarName + Twine(".inc"),
+                                ClonedLoopLatch->getTerminator());
 
-  // Insert a cmp instruction between the induction variable and the known trip
-  // count. Insert the instruction at the end of the latch BasicBlock.
+  // Compare the induction variable with the known trip count. Insert the
+  // instruction at the end of the latch BasicBlock.
   CmpInst *CmpInst =
       CmpInst::Create(Instruction::ICmp, CmpInst::ICMP_SLT, NextIndVar,
                       ConstantInt::getSigned(NextIndVar->getType(), TripCount),
-                      NewLoopIndVarName + Twine(".cmp"),
-                      NewLoopLatch->getTerminator());
+                      ClonedLoopIndVarName + Twine(".cmp"),
+                      ClonedLoopLatch->getTerminator());
 
   // At the moment, the cloned loop is not complete. We need to replace the
-  // unconditional branch from NewLoopLatch to Header with a conditional branch,
-  // that proceeds into Header only when the cloned loop finishes executing.
+  // unconditional branch from ClonedLoopLatch to Header with a conditional
+  // branch, that proceeds into Header only when the cloned loop finishes
+  // executing.
   //
-  // If we simply remove the unconditional branch at the end of NewLoopLatch,
-  // any PHINodes in Header whose values depend on entry from NewLoopLatch will
-  // be removed. Thus we create an empty basic block between NewLoopLatch and
+  // If we simply remove the unconditional branch at the end of ClonedLoopLatch,
+  // any PHINodes in Header whose values depend on entry from ClonedLoopLatch will
+  // be removed. Thus we create an empty basic block between ClonedLoopLatch and
   // Header. Now we can replace the branch.
-  BasicBlock *Dummy = SplitEdge(NewLoopLatch, Header, DT, LI);
+  BasicBlock *Dummy = SplitEdge(ClonedLoopLatch, Header, DT, LI);
   Dummy->setName(CurLoopRootName + Twine(".gcm.end"));
-  Dummy->removePredecessor(NewLoopLatch);
-  NewLoopLatch->getTerminator()->eraseFromParent();
+  Dummy->removePredecessor(ClonedLoopLatch);
+  ClonedLoopLatch->getTerminator()->eraseFromParent();
 
   // Create a conditional branch based on CmpInst.
-  BranchInst::Create(NewLoopHeader, Dummy, CmpInst, NewLoopLatch);
+  BranchInst::Create(ClonedLoopHeader, Dummy, CmpInst, ClonedLoopLatch);
 
   // Finally, fill in incoming values for the PHINode of the new induction
   // variable:
-  // 1) if control arrives from NewLoopPreheader, the loop is at its first
+  // 1) if control arrives from ClonedLoopPreheader, the loop is at its first
   //    iteration, so the induction variable is 0.
-  // 2) if control arrives from NewLoopLatch, the induction variable must be
+  // 2) if control arrives from ClonedLoopLatch, the induction variable must be
   //    updated to the value of NextIndVar.
-  NewLoopIndVar->addIncoming(ConstantInt::getSigned(NewLoopIndVar->getType(),
+  ClonedLoopIndVar->addIncoming(ConstantInt::getSigned(ClonedLoopIndVar->getType(),
                                                     0),
-                             NewLoopPreheader);
-  NewLoopIndVar->addIncoming(NextIndVar, NewLoopLatch);
+                             ClonedLoopPreheader);
+  ClonedLoopIndVar->addIncoming(NextIndVar, ClonedLoopLatch);
 }
 
+/// Applies generalized loop-invariant code motion to the current loop.
 bool GLICM::generalizedHoist(DomTreeNode* N, LICMSafetyInfo *SafetyInfo) {
   bool Changed = false;
   BasicBlock *BB = N->getBlock();
@@ -255,9 +256,9 @@ bool GLICM::generalizedHoist(DomTreeNode* N, LICMSafetyInfo *SafetyInfo) {
         // hoist it.
         continue;
 
-      if (shouldHoist(&I, SafetyInfo, NULL, true)) {
-        Changed |= hoist(&I, NewLoopHeader);
-        replaceIndVarOperand(&I, IndVar, NewLoopIndVar);
+      if (shouldHoist(&I, SafetyInfo, NULL)) {
+        Changed |= hoist(&I, ClonedLoopHeader);
+        replaceIndVarOperand(&I, IndVar, ClonedLoopIndVar);
       }
     }
 
@@ -268,6 +269,7 @@ bool GLICM::generalizedHoist(DomTreeNode* N, LICMSafetyInfo *SafetyInfo) {
   return Changed;
 }
 
+/// Returns true if I is invariant with respect to OuterLoop.
 bool GLICM::hasLoopInvariantOperands(Instruction *I, Loop *OuterLoop) {
   for (unsigned i = 0, e = I->getNumOperands(); i != e; ++i)
     if (!isInvariantForGLICM(I->getOperand(i), OuterLoop))
@@ -276,6 +278,8 @@ bool GLICM::hasLoopInvariantOperands(Instruction *I, Loop *OuterLoop) {
   return true;
 }
 
+/// Returns true if I has any operands apart from V which are invariant with
+/// respect to OuterLoop.
 bool GLICM::hasLoopInvariantOperandsApartFrom(Instruction *I, Loop *OuterLoop,
                                               Value *V) {
   for (unsigned i = 0, e = I->getNumOperands(); i != e; i++) {
@@ -287,20 +291,21 @@ bool GLICM::hasLoopInvariantOperandsApartFrom(Instruction *I, Loop *OuterLoop,
   return true;
 }
 
+/// Returns true if the given value is invariant with respect to OuterLoop.
 bool GLICM::isInvariantForGLICM(Value *V, Loop *OuterLoop) {
   if (Instruction *I = dyn_cast<Instruction>(V)) {
-
-    // If this operand is defined in the parent loop, it is clearly not
+    // If this value is defined in the parent loop, it is clearly not
     // invariant with respect to it.
     if (LI->getLoopFor(I->getParent()) == OuterLoop)
       return false;
 
-    // If this operand is the canonical induction variable of the current loop,
+    // If this value is the PHI node of the canonical induction variable,
     // we can hoist it and replace it with the induction variable in the cloned
     // loop.
     if (PHINode *PhiNode = dyn_cast<PHINode>(I))
       if (PhiNode == IndVar)
         return true;
+
     return CurLoop->isLoopInvariant(I);
   }
 
@@ -308,19 +313,21 @@ bool GLICM::isInvariantForGLICM(Value *V, Loop *OuterLoop) {
   return true;
 }
 
+/// Stores all definitions in the cloned loop who have uses in the original loop
+/// into arrays.
 void GLICM::replaceScalarsWithArrays(unsigned TripCount) {
 
   std::vector<Instruction*> InstrUsedOutsideLoop;
-  // Construct a list of all the instructions in the cloned loop that are used
-  // in the original. These will need to be stored in temporary arrays and their
-  // uses replaced.
-  for (BasicBlock::iterator II = NewLoopHeader->begin(),
-       E = NewLoopHeader->end(); II != E; ) {
+
+  // Construct a list of all the definitions in the cloned loop that are used
+  // in the original one.
+  for (BasicBlock::iterator II = ClonedLoopHeader->begin(),
+       E = ClonedLoopHeader->end(); II != E; ) {
     Instruction &I = *II++;
 
     // Skip the PHINode defining the canonical induction variable of the cloned
     // loop.
-    if (&I == NewLoopIndVar)
+    if (&I == ClonedLoopIndVar)
       continue;
 
     if (isUsedInOriginalLoop(&I))
@@ -330,27 +337,36 @@ void GLICM::replaceScalarsWithArrays(unsigned TripCount) {
   if (InstrUsedOutsideLoop.empty())
     return;
 
-  // Create a BasicBlock for temporary array definitions.
-  BasicBlock *TmpArrBlock = SplitEdge(NewLoopPreheader, NewLoopHeader, DT, LI);
-  TmpArrBlock->setName(NewLoopHeader->getName() + Twine(".tmparr"));
-  Constant *TmpArrSize = ConstantInt::getSigned(NewLoopIndVar->getType(),
+  // Create a BasicBlock for array definitions.
+  BasicBlock *ArrBlock = SplitEdge(ClonedLoopPreheader, ClonedLoopHeader, DT, LI);
+  ArrBlock->setName(ClonedLoopHeader->getName() + Twine(".arr"));
+  Constant *ArrSize = ConstantInt::getSigned(ClonedLoopIndVar->getType(),
                                                 TripCount);
 
   for (std::vector<Instruction*>::iterator II = InstrUsedOutsideLoop.begin();
        II != InstrUsedOutsideLoop.end(); ) {
     Instruction *CurInstr = *II++;
-    AllocaInst *TmpArr = createTemporaryArray(CurInstr, TmpArrSize,
-                                              TmpArrBlock);
-    storeInstructionInArray(CurInstr, TmpArr, NewLoopIndVar);
-    replaceUsesWithValueInArray(CurInstr, TmpArr, IndVar);
+
+    // Define a temporary array for storing the values of CurInstr in each
+    // iteration of the cloned loop.
+    AllocaInst *Arr = createTemporaryArray(CurInstr, ArrSize, ArrBlock);
+
+    // Store the value of CurInstr at the ith iteration of the cloned loop at
+    // Arr[i].
+    storeInstructionInArray(CurInstr, Arr, ClonedLoopIndVar);
+
+    // Replace uses of CurInstr at the ith iteration of the original loop with
+    // Arr[i].
+    replaceUsesWithValueInArray(CurInstr, Arr, IndVar);
   }
 
   InstrUsedOutsideLoop.clear();
 }
 
-// Returns true if the given instruction (which is part of the cloned loop)
-// is used in the current loop.
+/// Returns true if the given definition (present in the cloned loop) is used in
+/// the current loop.
 bool GLICM::isUsedInOriginalLoop(Instruction *I) {
+  assert(I->getParent() == ClonedLoopHeader);
   for (User *U : I->users()) {
     if (Instruction *UserInstr = dyn_cast<Instruction>(U)) {
       if (LI->getLoopFor(UserInstr->getParent()) == CurLoop)
@@ -360,32 +376,36 @@ bool GLICM::isUsedInOriginalLoop(Instruction *I) {
   return false;
 }
 
-// Replaces uses of I in CurLoop with Arr[Index].
+/// Replaces all uses of I in CurLoop with Arr[Index].
 void GLICM::replaceUsesWithValueInArray(Instruction *I, AllocaInst *Arr,
                                         Value *Index) {
     SmallVector<Value*, 8> GEPIndices;
     GEPIndices.push_back(Index);
 
     BasicBlock *BB = CurLoop->getHeader();
-    // Insert a GEP instruction at the beginning of BB.
+    // Create a GEP instruction for computing the address of the element at
+    // Arr[Index].
     GetElementPtrInst *GEP =
         GetElementPtrInst::Create(Arr->getAllocatedType(), Arr, GEPIndices,
                                   "glicm.arrayidx." + Twine(InstrIndex++),
                                   BB->getFirstNonPHI());
 
-    // Load Arr[Index], insert it at the beginning of BB (but after GEP).
+    // Load Arr[Index].
     LoadInst *Load = new LoadInst(GEP,
                                   "glicm.load." + Twine(InstrIndex++),
                                   BB->getFirstNonPHI());
     Load->removeFromParent();
     Load->insertAfter(GEP);
 
-    // Replace all uses of I outside the header of the cloned loop with
-    // Arr[Index].
-    I->replaceUsesOutsideBlock(Load, NewLoopHeader);
+    // Replace all uses of I inside the original loop with Arr[Index]. Since all
+    // uses of I apart from those in the cloned loop are guaranteed to be in
+    // the current loop (see conditions for hoisting), this is equivalent to the
+    // call below.
+    I->replaceUsesOutsideBlock(Load, ClonedLoopHeader);
 }
 
-// Allocates an array of size Size at the end of BB.
+/// Allocates an array holding Size elements of the same type as I at the end of
+/// the given BB.
 AllocaInst *GLICM::createTemporaryArray(Instruction *I, Constant *Size,
                                         BasicBlock* BB) {
   AllocaInst *TmpArr = new AllocaInst(I->getType(), Size,
@@ -395,7 +415,8 @@ AllocaInst *GLICM::createTemporaryArray(Instruction *I, Constant *Size,
   return TmpArr;
 }
 
-// Stores I in Arr at index Index.
+/// Creates a StoreInst that stores the result of I in Arr[Index] for the given
+/// array and index, and inserts it after I.
 void GLICM::storeInstructionInArray(Instruction *I, AllocaInst *Arr,
                                     Value *Index) {
   SmallVector<Value*, 8> GEPIndices;
@@ -415,50 +436,61 @@ void GLICM::storeInstructionInArray(Instruction *I, AllocaInst *Arr,
   S->insertAfter(I);
 }
 
+/// Returns true when it is profitable to hoist the given instruction to the
+/// cloned loop.
 bool GLICM::isProfitableToHoist(Instruction *Instr, LICMSafetyInfo *SafetyInfo) {
-  bool anyUserHoistable = false;
 
-  if (GetElementPtrInst *GEP = dyn_cast<GetElementPtrInst>(Instr)) {
-    for (User *U: GEP->users())
+  // We hoist GEP and Load instructions only if at least one of their users can
+  // be subsequently hoisted. This prevents pathological scenarios such as:
+  // 1) A GEP instruction is hoisted to the cloned loop, its computed address is
+  //    stored in a temporary array, and then loaded from that array in the
+  //    original loop (incurring an additional GEP and load).
+  // 2) A load instruction is hoisted to the cloned loop, its value is stored in
+  //    a temporary array, and then loaded from that array in the original loop
+  //    (incurring an additional GEP and load).
+  if (isa<GetElementPtrInst>(Instr) || isa<LoadInst>(Instr)) {
+    for (User *U: Instr->users())
       if (Instruction *I = dyn_cast<Instruction>(U))
-        anyUserHoistable |= shouldHoist(I, SafetyInfo, GEP, true);
-    return anyUserHoistable;
+        if (shouldHoist(I, SafetyInfo, Instr))
+          return true;
   }
 
+  // If this instruction is an incoming value for the induction variable's PHI
+  // node, don't hoist it out, since it does not add benefits.
   for (User *U : Instr->users())
     if (Instruction *I = dyn_cast<Instruction>(U)) {
-      // This instruction is used by the induction variable's PHI node, and
-      // so don't hoist it.
       if (I == IndVar)
         return false;
-
-      else
-        anyUserHoistable |= shouldHoist(I, SafetyInfo, Instr, false);
     }
 
+  // Hoist any binary operation, since this is the type of instruction we are
+  // usually most interested in.
   if (Instr->isBinaryOp())
     return true;
-  return anyUserHoistable;
+
+  // Otherwise do not hoist this instruction.
+  return false;
 }
 
-/// shouldHoist - return true if the given instruction should be hoisted out of
-/// its loop according to a simple profitability model.
-bool GLICM::shouldHoist(Instruction *I, LICMSafetyInfo *SafetyInfo, Value *V,
-                        bool ProfitabilityMatters) {
+/// Returns true if the given instruction should be hoisted out of its loop
+/// according to a simple profitability model.
+bool GLICM::shouldHoist(Instruction *I, LICMSafetyInfo *SafetyInfo, Value *V) {
   return (V == NULL ? hasLoopInvariantOperands(I, ParentLoop)
                     : hasLoopInvariantOperandsApartFrom(I, ParentLoop, V)) &&
          canSinkOrHoistInst(*I, AA, DT, CurLoop, CurAST, SafetyInfo) &&
          isSafeToExecuteUnconditionally(*I, DT, CurLoop, SafetyInfo) &&
          !isUsedOutsideOfLoop(I, CurLoop, LI) &&
-         (!ProfitabilityMatters || isProfitableToHoist(I, SafetyInfo));
+         isProfitableToHoist(I, SafetyInfo);
 }
 
+/// Moves I at the end of InsertionBlock.
 static bool hoist(Instruction *I, BasicBlock *InsertionBlock) {
   I->moveBefore(InsertionBlock->getTerminator());
   NumHoisted++;
   return true;
 }
 
+/// Replaces all uses of Old with New amongst I's operands.
 static void replaceIndVarOperand(Instruction *I, PHINode *Old, PHINode *New) {
   for (unsigned i = 0, e = I->getNumOperands(); i != e; ++i)
     if (PHINode *PhiOp = dyn_cast<PHINode>(I->getOperand(i)))
@@ -466,11 +498,13 @@ static void replaceIndVarOperand(Instruction *I, PHINode *Old, PHINode *New) {
         I->replaceUsesOfWith(Old, New);
 }
 
+/// Returns true if BB is part of CurLoop.
 static bool inSubLoop(BasicBlock *BB, Loop *CurLoop, LoopInfo *LI) {
   assert(CurLoop->contains(BB) && "Only valid if BB is IN the loop");
   return LI->getLoopFor(BB) != CurLoop;
 }
 
+/// Returns true if any uses of I lie outside of the loop L.
 static bool isUsedOutsideOfLoop(Instruction *I, Loop *L, LoopInfo *LI) {
   for (User *U : I->users())
     if (Instruction *UserI = dyn_cast<Instruction>(U))
@@ -479,28 +513,24 @@ static bool isUsedOutsideOfLoop(Instruction *I, Loop *L, LoopInfo *LI) {
   return false;
 }
 
-static bool loopMayThrow(Loop *L, Loop *CurLoop, LoopInfo *LI) {
+/// Returns true if any instruction in OuterLoop which is not part of CurLoop
+/// may throw an exception (assumes CurLoop is a subloop of InnerLoop).
+static bool loopMayThrow(Loop *OuterLoop, Loop *CurLoop, LoopInfo *LI) {
   bool MayThrow = false;
 
-  // Check if any instruction within L which does not belong to CurLoop may
-  // throw. If yes, then we cannot hoist instructions from CurLoop to L's
-  // preheader, because exceptions thrown by instructions of L may prevent
-  // that instruction from executing.
+  // Check if any instruction within OuterLoop which does not belong to CurLoop
+  // may throw.
 
   // This is a coarse-grained check, similar to what LICM does in the
   // computeLICMSafetyInfo function. More refined checks are possible, such as
   // checking whether the throwing instructions appear before or after the
-  // current loop. With this conservative approach, if there are any
-  // instructions that may throw in the L loop, this function will return false.
-  for (Loop::block_iterator BB = L->block_begin(),
-       BBE = L->block_end(); (BB != BBE) && !MayThrow ; ++BB)
+  // current loop.
+  for (Loop::block_iterator BB = OuterLoop->block_begin(),
+       BBE = OuterLoop->block_end(); (BB != BBE) && !MayThrow ; ++BB)
     if (LI->getLoopFor(*BB) != CurLoop)
       for (BasicBlock::iterator I = (*BB)->begin(), E = (*BB)->end();
            (I != E) && !MayThrow; ++I) {
-        if (I->mayThrow())
-          dbgs() << "Throwing instr: " << *I << "\n";
         MayThrow |= I->mayThrow();
       }
-
   return MayThrow;
 }
