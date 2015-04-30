@@ -76,7 +76,8 @@ namespace {
     bool isProfitableToHoist(Instruction *I, LICMSafetyInfo *SafetyInfo);
     bool hasLoopInvariantOperandsApartFrom(Instruction *I, Loop *OuterLoop,
                                            Value *V);
-    bool shouldHoist(Instruction *I, LICMSafetyInfo *SafetyInfo);
+    bool shouldHoist(Instruction *I, LICMSafetyInfo *SafetyInfo, Value *V,
+                     bool ProfitabilityMatters);
   };
 }
 
@@ -245,27 +246,16 @@ bool GLICM::generalizedHoist(DomTreeNode* N, LICMSafetyInfo *SafetyInfo) {
 
   if (!CurLoop->contains(BB))
     return Changed;
-  //if (CurLoop->getLoopLatch() == BB)
-  //  return Changed;
 
   if (!inSubLoop(BB, CurLoop, LI))
     for (BasicBlock::iterator II = BB->begin(), E = BB->end(); II != E; ) {
       Instruction &I = *II++;
       if (&I == IndVar)
-        // This is the induction variable, do not hoist it.
+        // This is the PHI node representing the induction variable, so do not
+        // hoist it.
         continue;
 
-      // dbgs() << "Instruction: " << I << "\n";
-      // bool i1 = hasLoopInvariantOperands(&I, ParentLoop);
-      // bool i2 = canSinkOrHoistInst(I, AA, DT, CurLoop, CurAST, SafetyInfo);
-      // bool i3 = isSafeToExecuteUnconditionally(I, DT, CurLoop, SafetyInfo);
-      // dbgs() << i1 << " " << i2 << " " << i3 << "\n";
-      // if (i1 && i2 && i3) {
-      //dbgs() << "[Can be hoisted = " << canSinkOrHoistInst(I, AA, DT, CurLoop, CurAST, SafetyInfo) <<
-        //      "] : Instruction: " << I << "\n";
-      if (shouldHoist(&I, SafetyInfo)) {
-//        dbgs() << "Instruction " << I << " will be hoisted. ";
-//        dbgs() << "Any user hoistable? " << isProfitableToHoist(&I, SafetyInfo) << "\n";
+      if (shouldHoist(&I, SafetyInfo, NULL, true)) {
         Changed |= hoist(&I, NewLoopHeader);
         replaceIndVarOperand(&I, IndVar, NewLoopIndVar);
       }
@@ -429,19 +419,9 @@ bool GLICM::isProfitableToHoist(Instruction *Instr, LICMSafetyInfo *SafetyInfo) 
   bool anyUserHoistable = false;
 
   if (GetElementPtrInst *GEP = dyn_cast<GetElementPtrInst>(Instr)) {
-    dbgs() << "Reached a GEP instr: " << *GEP << "\n";
     for (User *U: GEP->users())
-      if (Instruction *I = dyn_cast<Instruction>(U)) {
-        dbgs() << "One user of it is: " << *I << "\n";
-        anyUserHoistable |=
-         hasLoopInvariantOperandsApartFrom(I, ParentLoop, GEP) &&
-         canSinkOrHoistInst(*I, AA, DT, CurLoop, CurAST, SafetyInfo) &&
-         isSafeToExecuteUnconditionally(*I, DT, CurLoop, SafetyInfo) &&
-         !isUsedOutsideOfLoop(I, CurLoop, LI) &&
-         isProfitableToHoist(I, SafetyInfo);
-      }
-    if (!anyUserHoistable)
-      dbgs() << "Will not hoist: " << *GEP << "\n";
+      if (Instruction *I = dyn_cast<Instruction>(U))
+        anyUserHoistable |= shouldHoist(I, SafetyInfo, GEP, true);
     return anyUserHoistable;
   }
 
@@ -453,11 +433,7 @@ bool GLICM::isProfitableToHoist(Instruction *Instr, LICMSafetyInfo *SafetyInfo) 
         return false;
 
       else
-        anyUserHoistable |=
-          (hasLoopInvariantOperandsApartFrom(I, ParentLoop, Instr) &&
-           canSinkOrHoistInst(*I, AA, DT, CurLoop, CurAST, SafetyInfo) &&
-           isSafeToExecuteUnconditionally(*I, DT, CurLoop, SafetyInfo) &&
-           !isUsedOutsideOfLoop(I, CurLoop, LI));
+        anyUserHoistable |= shouldHoist(I, SafetyInfo, Instr, false);
     }
 
   if (Instr->isBinaryOp())
@@ -465,12 +441,16 @@ bool GLICM::isProfitableToHoist(Instruction *Instr, LICMSafetyInfo *SafetyInfo) 
   return anyUserHoistable;
 }
 
-bool GLICM::shouldHoist(Instruction* I, LICMSafetyInfo *SafetyInfo) {
-  return hasLoopInvariantOperands(I, ParentLoop) &&
+/// shouldHoist - return true if the given instruction should be hoisted out of
+/// its loop according to a simple profitability model.
+bool GLICM::shouldHoist(Instruction *I, LICMSafetyInfo *SafetyInfo, Value *V,
+                        bool ProfitabilityMatters) {
+  return (V == NULL ? hasLoopInvariantOperands(I, ParentLoop)
+                    : hasLoopInvariantOperandsApartFrom(I, ParentLoop, V)) &&
          canSinkOrHoistInst(*I, AA, DT, CurLoop, CurAST, SafetyInfo) &&
          isSafeToExecuteUnconditionally(*I, DT, CurLoop, SafetyInfo) &&
          !isUsedOutsideOfLoop(I, CurLoop, LI) &&
-         isProfitableToHoist(I, SafetyInfo);
+         (!ProfitabilityMatters || isProfitableToHoist(I, SafetyInfo));
 }
 
 static bool hoist(Instruction *I, BasicBlock *InsertionBlock) {
