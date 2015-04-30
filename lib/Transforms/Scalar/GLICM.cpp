@@ -54,6 +54,7 @@ namespace {
     AliasAnalysis *AA;
     AliasSetTracker *CurAST;
     DenseMap<Loop*, AliasSetTracker*> LoopToAliasSetMap;
+    LICMSafetyInfo *SafetyInfo;
 
     Loop *CurLoop;
     Loop *ParentLoop;
@@ -64,19 +65,20 @@ namespace {
     BasicBlock *ClonedLoopPreheader;
 
     void createMirrorLoop(Loop *L, unsigned TripCount);
-    bool generalizedHoist(DomTreeNode *N, LICMSafetyInfo *SafetyInfo);
+    bool generalizedHoist(DomTreeNode *N);
     bool hasLoopInvariantOperands(Instruction *I, Loop *OuterLoop);
     bool isInvariantForGLICM(Value *V, Loop *OuterLoop);
     void replaceScalarsWithArrays(unsigned TripCount);
     bool isUsedInOriginalLoop(Instruction *I);
-    void replaceUsesWithValueInArray(Instruction *I, AllocaInst *Arr, Value *Index);
+    void replaceUsesWithValueInArray(Instruction *I, AllocaInst *Arr,
+                                     Value *Index);
     AllocaInst *createTemporaryArray(Instruction *I, Constant *Size,
                                      BasicBlock* BB);
     void storeInstructionInArray(Instruction *I, AllocaInst *Arr, Value *Index);
-    bool isProfitableToHoist(Instruction *I, LICMSafetyInfo *SafetyInfo);
+    bool isProfitableToHoist(Instruction *I);
     bool hasLoopInvariantOperandsApartFrom(Instruction *I, Loop *OuterLoop,
                                            Value *V);
-    bool shouldHoist(Instruction *I, LICMSafetyInfo *SafetyInfo, Value *V);
+    bool shouldHoist(Instruction *I, Value *V);
   };
 }
 
@@ -156,18 +158,20 @@ bool GLICM::runOnLoop(Loop *L, LPPassManager &LPM) {
   }
 
   // Compute Loop safety information for CurLoop.
-  LICMSafetyInfo CurLoopSafetyInfo;
-  computeLICMSafetyInfo(&CurLoopSafetyInfo, CurLoop);
+  SafetyInfo = new LICMSafetyInfo();
+  computeLICMSafetyInfo(SafetyInfo, CurLoop);
 
   // Clone the current loop in the preheader of its parent loop.
   createMirrorLoop(ParentLoop, TripCount);
 
   // Move appropriate instructions from the original loop to the cloned loop.
-  Changed = generalizedHoist(DT->getNode(L->getHeader()), &CurLoopSafetyInfo);
+  Changed = generalizedHoist(DT->getNode(L->getHeader()));
 
   // Replace uses of the hoisted instructions in the original loop with uses of
   // results loaded from temporary arrays.
   replaceScalarsWithArrays(TripCount);
+
+  delete SafetyInfo;
   return Changed;
 }
 
@@ -241,7 +245,7 @@ void GLICM::createMirrorLoop(Loop *L, unsigned TripCount) {
 }
 
 /// Applies generalized loop-invariant code motion to the current loop.
-bool GLICM::generalizedHoist(DomTreeNode* N, LICMSafetyInfo *SafetyInfo) {
+bool GLICM::generalizedHoist(DomTreeNode* N) {
   bool Changed = false;
   BasicBlock *BB = N->getBlock();
 
@@ -256,7 +260,7 @@ bool GLICM::generalizedHoist(DomTreeNode* N, LICMSafetyInfo *SafetyInfo) {
         // hoist it.
         continue;
 
-      if (shouldHoist(&I, SafetyInfo, NULL)) {
+      if (shouldHoist(&I, NULL)) {
         Changed |= hoist(&I, ClonedLoopHeader);
         replaceIndVarOperand(&I, IndVar, ClonedLoopIndVar);
       }
@@ -264,7 +268,7 @@ bool GLICM::generalizedHoist(DomTreeNode* N, LICMSafetyInfo *SafetyInfo) {
 
   const std::vector<DomTreeNode*> &Children = N->getChildren();
   for (unsigned i = 0, e = Children.size(); i != e; ++i)
-    Changed |= generalizedHoist(Children[i], SafetyInfo);
+    Changed |= generalizedHoist(Children[i]);
 
   return Changed;
 }
@@ -438,7 +442,7 @@ void GLICM::storeInstructionInArray(Instruction *I, AllocaInst *Arr,
 
 /// Returns true when it is profitable to hoist the given instruction to the
 /// cloned loop.
-bool GLICM::isProfitableToHoist(Instruction *Instr, LICMSafetyInfo *SafetyInfo) {
+bool GLICM::isProfitableToHoist(Instruction *Instr) {
 
   // We hoist GEP and Load instructions only if at least one of their users can
   // be subsequently hoisted. This prevents pathological scenarios such as:
@@ -451,7 +455,7 @@ bool GLICM::isProfitableToHoist(Instruction *Instr, LICMSafetyInfo *SafetyInfo) 
   if (isa<GetElementPtrInst>(Instr) || isa<LoadInst>(Instr)) {
     for (User *U: Instr->users())
       if (Instruction *I = dyn_cast<Instruction>(U))
-        if (shouldHoist(I, SafetyInfo, Instr))
+        if (shouldHoist(I, Instr))
           return true;
   }
 
@@ -474,13 +478,13 @@ bool GLICM::isProfitableToHoist(Instruction *Instr, LICMSafetyInfo *SafetyInfo) 
 
 /// Returns true if the given instruction should be hoisted out of its loop
 /// according to a simple profitability model.
-bool GLICM::shouldHoist(Instruction *I, LICMSafetyInfo *SafetyInfo, Value *V) {
+bool GLICM::shouldHoist(Instruction *I, Value *V) {
   return (V == NULL ? hasLoopInvariantOperands(I, ParentLoop)
                     : hasLoopInvariantOperandsApartFrom(I, ParentLoop, V)) &&
          canSinkOrHoistInst(*I, AA, DT, CurLoop, CurAST, SafetyInfo) &&
          isSafeToExecuteUnconditionally(*I, DT, CurLoop, SafetyInfo) &&
          !isUsedOutsideOfLoop(I, CurLoop, LI) &&
-         isProfitableToHoist(I, SafetyInfo);
+         isProfitableToHoist(I);
 }
 
 /// Moves I at the end of InsertionBlock.
