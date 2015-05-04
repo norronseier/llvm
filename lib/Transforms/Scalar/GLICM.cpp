@@ -83,14 +83,14 @@ namespace {
 }
 
 char GLICM::ID = 0;
-INITIALIZE_PASS_BEGIN(GLICM, "glicm", "GLICM", false, false)
+INITIALIZE_PASS_BEGIN(GLICM, "glicm", "GLICM", true, false)
 INITIALIZE_PASS_DEPENDENCY(DominatorTreeWrapperPass)
 INITIALIZE_PASS_DEPENDENCY(LoopInfoWrapperPass)
 INITIALIZE_PASS_DEPENDENCY(LoopSimplify)
 INITIALIZE_PASS_DEPENDENCY(LCSSA)
 INITIALIZE_PASS_DEPENDENCY(ScalarEvolution)
 INITIALIZE_AG_DEPENDENCY(AliasAnalysis)
-INITIALIZE_PASS_END(GLICM, "glicm", "GLICM", false, false)
+INITIALIZE_PASS_END(GLICM, "glicm", "GLICM", true, false)
 
 Pass *llvm::createGLICMPass() { return new GLICM(); }
 
