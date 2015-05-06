@@ -40,7 +40,6 @@ namespace {
       AU.addRequired<DominatorTreeWrapperPass>();
       AU.addRequired<LoopInfoWrapperPass>();
       AU.addRequired<ScalarEvolution>();
-      AU.addRequiredID(LCSSAID);
       AU.addRequiredID(LoopSimplifyID);
     }
 
@@ -83,11 +82,12 @@ namespace {
 }
 
 char GLICM::ID = 0;
-INITIALIZE_PASS_BEGIN(GLICM, "glicm", "GLICM", true, false)
+INITIALIZE_PASS_BEGIN(GLICM, "glicm", "Generalized Loop-Invariant Code Motion",
+                      true, /* Modifies the CFG of the function */
+                      false) /* Is not an analysis pass */
 INITIALIZE_PASS_DEPENDENCY(DominatorTreeWrapperPass)
 INITIALIZE_PASS_DEPENDENCY(LoopInfoWrapperPass)
 INITIALIZE_PASS_DEPENDENCY(LoopSimplify)
-INITIALIZE_PASS_DEPENDENCY(LCSSA)
 INITIALIZE_PASS_DEPENDENCY(ScalarEvolution)
 INITIALIZE_AG_DEPENDENCY(AliasAnalysis)
 INITIALIZE_PASS_END(GLICM, "glicm", "GLICM", true, false)
