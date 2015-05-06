@@ -25,6 +25,8 @@ static void replaceIndVarOperand(Instruction *I, PHINode *Old, PHINode *New);
 static bool inSubLoop(BasicBlock *BB, Loop *CurLoop, LoopInfo *LI);
 static bool isUsedOutsideOfLoop(Instruction *I, Loop *L, LoopInfo *LI);
 static bool loopMayThrow(Loop *L, Loop *CurLoop, LoopInfo *LI);
+static bool subloopGuaranteedToExecute(Loop *SubLoop, Loop *ParentLoop,
+                                       DominatorTree *DT);
 
 namespace {
   struct GLICM : public LoopPass {
@@ -152,8 +154,12 @@ bool GLICM::runOnLoop(Loop *L, LPPassManager &LPM) {
   //    pre-header.
   // 2) they have a parent loop which is in loop simplify form (to ensure the
   //    loop has a valid pre-header)
-  if (!(ParentLoop && ParentLoop->isLoopSimplifyForm() && IndVar &&
-      TripCount > 0 && !ParentLoopMayThrow)) {
+  if (!(ParentLoop &&
+        ParentLoop->isLoopSimplifyForm() &&
+        IndVar &&
+        TripCount > 0 &&
+        !ParentLoopMayThrow &&
+        subloopGuaranteedToExecute(CurLoop, ParentLoop, DT))) {
     return Changed;
   }
 
@@ -537,4 +543,25 @@ static bool loopMayThrow(Loop *OuterLoop, Loop *CurLoop, LoopInfo *LI) {
         MayThrow |= I->mayThrow();
       }
   return MayThrow;
+}
+
+/// Returns true if SubLoop (which must be a subloop of ParentLoop) is not
+/// guarded by any condition, and thus is guaranteed to execute.
+static bool subloopGuaranteedToExecute(Loop *SubLoop, Loop *ParentLoop,
+                                       DominatorTree *DT) {
+  BasicBlock *SubLoopHeader = SubLoop->getHeader();
+
+  SmallVector<BasicBlock*, 8> ParentLoopExitBlocks;
+  ParentLoop->getExitBlocks(ParentLoopExitBlocks);
+
+  for (int i = 0, e = ParentLoopExitBlocks.size(); i < e; i++)
+    if (!DT->dominates(SubLoopHeader, ParentLoopExitBlocks[i])) {
+      dbgs() << "Subloop " << SubLoop->getHeader()->getName()
+             <<" does not dominate all exit blocks of parent loop\n";
+      return false;
+    }
+
+  dbgs() << "Subloop " << SubLoop->getHeader()->getName()
+         << " dominates all exit blocks of parent\n";
+  return true;
 }
