@@ -48,6 +48,10 @@ namespace {
       return HoistableInstrSet.count(I) != 0;
     }
 
+    bool isEmpty() {
+      return HoistableInstrSet.empty();
+    }
+
     std::vector<Instruction*> getHoistableInstructions() {
       std::vector<Instruction*> HoistableInstr;
       for (unsigned i = 0; i < HoistableInstrVector.size(); i++)
@@ -136,7 +140,6 @@ INITIALIZE_PASS_END(GLICM, "glicm", "GLICM", true, false)
 Pass *llvm::createGLICMPass() { return new GLICM(); }
 
 bool GLICM::runOnLoop(Loop *L, LPPassManager &LPM) {
-  bool Changed = false;
   ScalarEvolution *SCEV = &getAnalysis<ScalarEvolution>();
   DT = &getAnalysis<DominatorTreeWrapperPass>().getDomTree();
   LI = &getAnalysis<LoopInfoWrapperPass>().getLoopInfo();
@@ -199,7 +202,7 @@ bool GLICM::runOnLoop(Loop *L, LPPassManager &LPM) {
         TripCount > 0 &&
         !ParentLoopMayThrow &&
         subloopGuaranteedToExecute(CurLoop, ParentLoop, DT))) {
-    return Changed;
+    return false;
   }
 
   // Compute Loop safety information for CurLoop.
@@ -208,11 +211,13 @@ bool GLICM::runOnLoop(Loop *L, LPPassManager &LPM) {
 
   HoistableSet = new SequentialHoistableInstrSet();
   analyzeForGlicm(DT->getNode(L->getHeader()));
+  filterUnprofitableHoists(HoistableSet);
 
   // Clone the current loop in the preheader of its parent loop.
-  createMirrorLoop(ParentLoop, TripCount);
+  if (HoistableSet->isEmpty())
+    return false;
 
-  filterUnprofitableHoists(HoistableSet);
+  createMirrorLoop(ParentLoop, TripCount);
 
   std::vector<Instruction*> HoistableInstrVector = HoistableSet->getHoistableInstructions();
   for (unsigned i = 0; i < HoistableInstrVector.size(); i++) {
@@ -228,7 +233,7 @@ bool GLICM::runOnLoop(Loop *L, LPPassManager &LPM) {
   delete SafetyInfo;
   delete HoistableSet;
 
-  return Changed;
+  return true;
 }
 
 /// Creates an empty loop with the same iteration space as CurLoop in the
