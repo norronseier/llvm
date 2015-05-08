@@ -57,6 +57,8 @@ namespace {
       for (unsigned i = 0; i < HoistableInstrVector.size(); i++)
         if (isHoistable(HoistableInstrVector[i]))
           HoistableInstr.push_back(HoistableInstrVector[i]);
+
+      HoistableInstrVector = HoistableInstr;
       return HoistableInstr;
     }
 
@@ -90,7 +92,6 @@ namespace {
 
   private:
     // TODO: Add documentation for fields and functions.
-    int counter = 0;
     long InstrIndex = 0;
 
     DominatorTree *DT;
@@ -102,15 +103,18 @@ namespace {
 
     Loop *CurLoop;
     Loop *ParentLoop;
+
     PHINode *IndVar;
     PHINode *ClonedLoopIndVar;
+
     BasicBlock *ClonedLoopHeader;
     BasicBlock *ClonedLoopLatch;
     BasicBlock *ClonedLoopPreheader;
+
     SequentialHoistableInstrSet *HoistableSet;
 
     void createMirrorLoop(Loop *L, unsigned TripCount);
-    bool analyzeForGlicm(DomTreeNode *N);
+    bool gatherHoistableInstructions(DomTreeNode *N);
     bool hasLoopInvariantOperands(Instruction *I, Loop *OuterLoop);
     bool isInvariantForGLICM(Value *V, Loop *OuterLoop);
     void replaceScalarsWithArrays(unsigned TripCount);
@@ -120,7 +124,6 @@ namespace {
     AllocaInst *createTemporaryArray(Instruction *I, Constant *Size,
                                      BasicBlock* BB);
     void storeInstructionInArray(Instruction *I, AllocaInst *Arr, Value *Index);
-    bool isProfitableToHoist(Instruction *I);
     bool canHoist(Instruction *I);
     void filterUnprofitableHoists(SequentialHoistableInstrSet *HS);
   };
@@ -149,8 +152,8 @@ bool GLICM::runOnLoop(Loop *L, LPPassManager &LPM) {
   unsigned TripCount = SCEV->getSmallConstantTripCount(L);
   IndVar = L->getCanonicalInductionVariable();
   ParentLoop = L->getParentLoop();
-  bool ParentLoopMayThrow = false;
 
+  bool ParentLoopMayThrow = false;
   if (ParentLoop)
     ParentLoopMayThrow = loopMayThrow(ParentLoop, CurLoop, LI);
 
@@ -177,6 +180,8 @@ bool GLICM::runOnLoop(Loop *L, LPPassManager &LPM) {
   }
 
   // Add BB's from the parent loop to the alias set tracker.
+  // Note that this also adds basic blocks that may follow the current loop in
+  // the parent loop.
   if (ParentLoop) {
     for (Loop::block_iterator I = ParentLoop->block_begin(),
          E = ParentLoop->block_end(); I != E; ++I) {
@@ -211,17 +216,20 @@ bool GLICM::runOnLoop(Loop *L, LPPassManager &LPM) {
   SafetyInfo = new LICMSafetyInfo();
   computeLICMSafetyInfo(SafetyInfo, CurLoop);
 
+  // Gather hoistable instructions and filter the unprofitable ones.
   HoistableSet = new SequentialHoistableInstrSet();
-  analyzeForGlicm(DT->getNode(L->getHeader()));
+  gatherHoistableInstructions(DT->getNode(L->getHeader()));
   filterUnprofitableHoists(HoistableSet);
 
-  // Clone the current loop in the preheader of its parent loop.
+  // If there are no hoistable instructions, return from the function.
   if (HoistableSet->isEmpty())
     return false;
 
+  // Clone the current loop in the preheader of its parent loop.
   createMirrorLoop(ParentLoop, TripCount);
 
-  std::vector<Instruction*> HoistableInstrVector = HoistableSet->getHoistableInstructions();
+  std::vector<Instruction*> HoistableInstrVector =
+    HoistableSet->getHoistableInstructions();
   for (unsigned i = 0; i < HoistableInstrVector.size(); i++) {
     Instruction *I = HoistableInstrVector[i];
     hoist(I, ClonedLoopHeader);
@@ -234,7 +242,6 @@ bool GLICM::runOnLoop(Loop *L, LPPassManager &LPM) {
 
   delete SafetyInfo;
   delete HoistableSet;
-
   return true;
 }
 
@@ -332,7 +339,6 @@ bool GLICM::isInvariantForGLICM(Value *V, Loop *OuterLoop) {
 /// Stores all definitions in the cloned loop who have uses in the original loop
 /// into arrays.
 void GLICM::replaceScalarsWithArrays(unsigned TripCount) {
-
   std::vector<Instruction*> InstrUsedOutsideLoop;
 
   // Construct a list of all the definitions in the cloned loop that are used
@@ -427,6 +433,7 @@ AllocaInst *GLICM::createTemporaryArray(Instruction *I, Constant *Size,
   AllocaInst *TmpArr = new AllocaInst(I->getType(), Size,
                                       "glicm.arr." + Twine(InstrIndex++),
                                       BB->getTerminator());
+  DEBUG(dbgs() << "GLICM allocating array: " << *TmpArr << "\n");
   NumTmpArrays++;
   return TmpArr;
 }
@@ -454,6 +461,8 @@ void GLICM::storeInstructionInArray(Instruction *I, AllocaInst *Arr,
 
 /// Moves I at the end of InsertionBlock.
 static bool hoist(Instruction *I, BasicBlock *InsertionBlock) {
+  DEBUG(dbgs() << "GLICM hoisting to " << InsertionBlock->getName() << ": "
+        << *I << "\n");
   I->moveBefore(InsertionBlock->getTerminator());
   NumHoisted++;
   return true;
@@ -521,7 +530,7 @@ static bool subloopGuaranteedToExecute(Loop *SubLoop, Loop *ParentLoop,
 }
 
 /// Applies generalized loop-invariant code motion to the current loop.
-bool GLICM::analyzeForGlicm(DomTreeNode* N) {
+bool GLICM::gatherHoistableInstructions(DomTreeNode* N) {
   bool Changed = false;
   BasicBlock *BB = N->getBlock();
 
@@ -531,9 +540,9 @@ bool GLICM::analyzeForGlicm(DomTreeNode* N) {
   if (!inSubLoop(BB, CurLoop, LI))
     for (BasicBlock::iterator II = BB->begin(), E = BB->end(); II != E; ) {
       Instruction &I = *II++;
-      if (&I == IndVar)
-        // This is the PHI node representing the induction variable, so do not
-        // hoist it.
+
+      // Do not hoist PHI instructions.
+      if (isa<PHINode>(&I))
         continue;
 
       if (canHoist(&I))
@@ -542,7 +551,7 @@ bool GLICM::analyzeForGlicm(DomTreeNode* N) {
 
   const std::vector<DomTreeNode*> &Children = N->getChildren();
   for (unsigned i = 0, e = Children.size(); i != e; ++i)
-    Changed |= analyzeForGlicm(Children[i]);
+    Changed |= gatherHoistableInstructions(Children[i]);
 
   return Changed;
 }
@@ -554,7 +563,8 @@ bool GLICM::canHoist(Instruction *I) {
          !isUsedOutsideOfLoop(I, CurLoop, LI);
 }
 
-/// Returns true if I is invariant with respect to OuterLoop.
+/// Returns true if I is invariant with respect to OuterLoop and the
+/// instructions already present in HoistableSet.
 bool GLICM::hasLoopInvariantOperands(Instruction *I, Loop *OuterLoop) {
   for (unsigned i = 0, e = I->getNumOperands(); i != e; ++i) {
     Value *V = I->getOperand(i);
@@ -564,17 +574,20 @@ bool GLICM::hasLoopInvariantOperands(Instruction *I, Loop *OuterLoop) {
     if (!isInvariantForGLICM(V, OuterLoop))
       return false;
   }
-
   return true;
 }
 
+/// Removes unprofitable hoistable instructions from the given set based on a
+/// simple cost model.
 void GLICM::filterUnprofitableHoists(SequentialHoistableInstrSet *HS) {
   std::vector<Instruction*> HoistableInstrVector =
       HS->getHoistableInstructions();
 
-  for (std::vector<Instruction *>::reverse_iterator
-        B = HoistableInstrVector.rbegin(), E = HoistableInstrVector.rend();
-        B != E; B++) {
+  // Iterate over instructions in reverse order, because it makes easy to remove
+  // instructions without worrying about any hanging uses they might have.
+  for (std::vector<Instruction*>::reverse_iterator
+       B = HoistableInstrVector.rbegin(), E = HoistableInstrVector.rend();
+       B != E; B++) {
     Instruction *I = *B;
 
     // If instruction was already 'de-hoisted', ignore it and continue.
@@ -592,7 +605,7 @@ void GLICM::filterUnprofitableHoists(SequentialHoistableInstrSet *HS) {
         }
       }
 
-    // Treat GEPs and Loads separately.
+    // Remove GEPInstrs and LoadInstrs that have no hoistable users.
     if (isa<GetElementPtrInst>(I) || isa<LoadInst>(I)) {
       bool Profitable = false;
       for (User *U: I->users())
