@@ -606,7 +606,7 @@ void GLICM::filterUnprofitableHoists(SequentialHoistableInstrSet *HS) {
       }
 
     // Remove GEPInstrs and LoadInstrs that have no hoistable users.
-    if (isa<GetElementPtrInst>(I) || isa<LoadInst>(I)) {
+    if (isa<GetElementPtrInst>(I) || isa<LoadInst>(I) || isa<CastInst>(I)) {
       bool Profitable = false;
       for (User *U: I->users())
         if (Instruction *UI = dyn_cast<Instruction>(U))
