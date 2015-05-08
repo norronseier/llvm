@@ -188,14 +188,16 @@ bool GLICM::runOnLoop(Loop *L, LPPassManager &LPM) {
   } else
     delete CurAST;
 
-  // Apply generalized loop-invariant code motion to loops that satisfy all the
-  // following conditions:
-  // 1) they have a canonical induction variable (starting from 0 and
-  //    incremented by 1 each iteration) and a computable trip count. This is
+  // To be candidates for GLICM, loops must:
+  // 1) have a canonical induction variable (starting from 0 and incremented by
+  //    1 each iteration) and a computable trip count. These restrictions are
   //    needed in order to clone the structure of the loop in the parent loop's
   //    pre-header.
-  // 2) they have a parent loop which is in loop simplify form (to ensure the
-  //    loop has a valid pre-header)
+  // 2) have a parent loop which is in loop simplify form (to ensure the
+  //    loop has a valid pre-header).
+  // 3) be guaranteed to execute in the parent loop (entry to these loops must
+  //    not be guarded by a condition).
+  // 4) not have a parent loop that contains throwing instructions.
   if (!(ParentLoop &&
         ParentLoop->isLoopSimplifyForm() &&
         IndVar &&
@@ -512,14 +514,9 @@ static bool subloopGuaranteedToExecute(Loop *SubLoop, Loop *ParentLoop,
   ParentLoop->getExitBlocks(ParentLoopExitBlocks);
 
   for (int i = 0, e = ParentLoopExitBlocks.size(); i < e; i++)
-    if (!DT->dominates(SubLoopHeader, ParentLoopExitBlocks[i])) {
-      dbgs() << "Subloop " << SubLoop->getHeader()->getName()
-             <<" does not dominate all exit blocks of parent loop\n";
+    if (!DT->dominates(SubLoopHeader, ParentLoopExitBlocks[i]))
       return false;
-    }
 
-  dbgs() << "Subloop " << SubLoop->getHeader()->getName()
-         << " dominates all exit blocks of parent\n";
   return true;
 }
 
@@ -539,10 +536,8 @@ bool GLICM::analyzeForGlicm(DomTreeNode* N) {
         // hoist it.
         continue;
 
-      if (canHoist(&I)) {
+      if (canHoist(&I))
         HoistableSet->addInstruction(&I);
-        dbgs() << "Hoisting: " << I << "\n";
-      }
     }
 
   const std::vector<DomTreeNode*> &Children = N->getChildren();
@@ -581,7 +576,6 @@ void GLICM::filterUnprofitableHoists(SequentialHoistableInstrSet *HS) {
         B = HoistableInstrVector.rbegin(), E = HoistableInstrVector.rend();
         B != E; B++) {
     Instruction *I = *B;
-    dbgs() << "Inspecting " << *I << "\n";
 
     // If instruction was already 'de-hoisted', ignore it and continue.
     if (!HS->isHoistable(I))
