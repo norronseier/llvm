@@ -143,6 +143,7 @@ INITIALIZE_PASS_END(GLICM, "glicm", "GLICM", true, false)
 Pass *llvm::createGLICMPass() { return new GLICM(); }
 
 bool GLICM::runOnLoop(Loop *L, LPPassManager &LPM) {
+  
   ScalarEvolution *SCEV = &getAnalysis<ScalarEvolution>();
   DT = &getAnalysis<DominatorTreeWrapperPass>().getDomTree();
   LI = &getAnalysis<LoopInfoWrapperPass>().getLoopInfo();
@@ -224,6 +225,10 @@ bool GLICM::runOnLoop(Loop *L, LPPassManager &LPM) {
   // If there are no hoistable instructions, return from the function.
   if (HoistableSet->isEmpty())
     return false;
+  DEBUG(dbgs() << "===========================\n"); 
+  DEBUG(dbgs() << "Glicm applying in function: [" 
+               << L->getHeader()->getParent()->getName() 
+               << "], loop: " << L->getHeader()->getName() << "\n");
 
   // Clone the current loop in the preheader of its parent loop.
   createMirrorLoop(ParentLoop, TripCount);
@@ -239,6 +244,7 @@ bool GLICM::runOnLoop(Loop *L, LPPassManager &LPM) {
   // Replace uses of the hoisted instructions in the original loop with uses of
   // results loaded from temporary arrays.
   replaceScalarsWithArrays(TripCount);
+  DEBUG(dbgs() << "===========================\n"); 
 
   delete SafetyInfo;
   delete HoistableSet;
