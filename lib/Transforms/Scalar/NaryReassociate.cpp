@@ -181,7 +181,8 @@ bool NaryReassociate::doOneIteration(Function &F) {
        Node != GraphTraits<DominatorTree *>::nodes_end(DT); ++Node) {
     BasicBlock *BB = Node->getBlock();
     for (auto I = BB->begin(); I != BB->end(); ++I) {
-      if (I->getOpcode() == Instruction::Add) {
+      // Skip vector types which are not SCEVable.
+      if (I->getOpcode() == Instruction::Add && !I->getType()->isVectorTy()) {
         if (Instruction *NewI = tryReassociateAdd(I)) {
           Changed = true;
           SE->forgetValue(I);
@@ -216,10 +217,14 @@ Instruction *NaryReassociate::tryReassociateAdd(Value *LHS, Value *RHS,
     //   = (A + RHS) + B or (B + RHS) + A
     const SCEV *AExpr = SE->getSCEV(A), *BExpr = SE->getSCEV(B);
     const SCEV *RHSExpr = SE->getSCEV(RHS);
-    if (auto *NewI = tryReassociatedAdd(SE->getAddExpr(AExpr, RHSExpr), B, I))
-      return NewI;
-    if (auto *NewI = tryReassociatedAdd(SE->getAddExpr(BExpr, RHSExpr), A, I))
-      return NewI;
+    if (BExpr != RHSExpr) {
+      if (auto *NewI = tryReassociatedAdd(SE->getAddExpr(AExpr, RHSExpr), B, I))
+        return NewI;
+    }
+    if (AExpr != RHSExpr) {
+      if (auto *NewI = tryReassociatedAdd(SE->getAddExpr(BExpr, RHSExpr), A, I))
+        return NewI;
+    }
   }
   return nullptr;
 }

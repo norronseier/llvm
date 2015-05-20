@@ -118,7 +118,7 @@ MCSymbol *MMIAddrLabelMap::getAddrLabelSymbol(BasicBlock *BB) {
   BBCallbacks.back().setMap(this);
   Entry.Index = BBCallbacks.size()-1;
   Entry.Fn = BB->getParent();
-  MCSymbol *Result = Context.CreateTempSymbol();
+  MCSymbol *Result = Context.createTempSymbol();
   Entry.Symbols = Result;
   return Result;
 }
@@ -401,7 +401,7 @@ void MachineModuleInfo::addInvoke(MachineBasicBlock *LandingPad,
 /// addLandingPad - Provide the label of a try LandingPad block.
 ///
 MCSymbol *MachineModuleInfo::addLandingPad(MachineBasicBlock *LandingPad) {
-  MCSymbol *LandingPadLabel = Context.CreateTempSymbol();
+  MCSymbol *LandingPadLabel = Context.createTempSymbol();
   LandingPadInfo &LP = getOrCreateLandingPadInfo(LandingPad);
   LP.LandingPadLabel = LandingPadLabel;
   return LandingPadLabel;
@@ -461,12 +461,23 @@ void MachineModuleInfo::addCleanup(MachineBasicBlock *LandingPad) {
   LP.TypeIds.push_back(0);
 }
 
-MCSymbol *
-MachineModuleInfo::addClauseForLandingPad(MachineBasicBlock *LandingPad) {
-  MCSymbol *ClauseLabel = Context.CreateTempSymbol();
+void MachineModuleInfo::addSEHCatchHandler(MachineBasicBlock *LandingPad,
+                                           const Function *Filter,
+                                           const BlockAddress *RecoverBA) {
   LandingPadInfo &LP = getOrCreateLandingPadInfo(LandingPad);
-  LP.ClauseLabels.push_back(ClauseLabel);
-  return ClauseLabel;
+  SEHHandler Handler;
+  Handler.FilterOrFinally = Filter;
+  Handler.RecoverBA = RecoverBA;
+  LP.SEHHandlers.push_back(Handler);
+}
+
+void MachineModuleInfo::addSEHCleanupHandler(MachineBasicBlock *LandingPad,
+                                             const Function *Cleanup) {
+  LandingPadInfo &LP = getOrCreateLandingPadInfo(LandingPad);
+  SEHHandler Handler;
+  Handler.FilterOrFinally = Cleanup;
+  Handler.RecoverBA = nullptr;
+  LP.SEHHandlers.push_back(Handler);
 }
 
 /// TidyLandingPads - Remap landing pad labels and remove any deleted landing

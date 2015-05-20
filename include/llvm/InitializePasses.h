@@ -248,6 +248,7 @@ void initializeSROA_DTPass(PassRegistry&);
 void initializeSROA_SSAUpPass(PassRegistry&);
 void initializeScalarEvolutionAliasAnalysisPass(PassRegistry&);
 void initializeScalarEvolutionPass(PassRegistry&);
+void initializeShrinkWrapPass(PassRegistry &);
 void initializeSimpleInlinerPass(PassRegistry&);
 void initializeShadowStackGCLoweringPass(PassRegistry&);
 void initializeRegisterCoalescerPass(PassRegistry&);
@@ -256,6 +257,7 @@ void initializeSinkingPass(PassRegistry&);
 void initializeSeparateConstOffsetFromGEPPass(PassRegistry &);
 void initializeSlotIndexesPass(PassRegistry&);
 void initializeSpillPlacementPass(PassRegistry&);
+void initializeSpeculativeExecutionPass(PassRegistry&);
 void initializeStackProtectorPass(PassRegistry&);
 void initializeStackColoringPass(PassRegistry&);
 void initializeStackSlotColoringPass(PassRegistry&);
@@ -268,7 +270,6 @@ void initializeStripSymbolsPass(PassRegistry&);
 void initializeTailCallElimPass(PassRegistry&);
 void initializeTailDuplicatePassPass(PassRegistry&);
 void initializeTargetPassConfigPass(PassRegistry&);
-void initializeDataLayoutPassPass(PassRegistry &);
 void initializeTargetTransformInfoWrapperPassPass(PassRegistry &);
 void initializeTargetLibraryInfoWrapperPassPass(PassRegistry &);
 void initializeAssumptionCacheTrackerPass(PassRegistry &);
@@ -298,6 +299,7 @@ void initializePlaceBackedgeSafepointsImplPass(PassRegistry&);
 void initializePlaceSafepointsPass(PassRegistry&);
 void initializeDwarfEHPreparePass(PassRegistry&);
 void initializeFloat2IntPass(PassRegistry&);
+void initializeLoopDistributePass(PassRegistry&);
 }
 
 #endif

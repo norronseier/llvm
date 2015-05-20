@@ -53,6 +53,7 @@ class MCSection;
 class MCStreamer;
 class MCSubtargetInfo;
 class MCSymbol;
+class MCTargetOptions;
 class MDNode;
 class DwarfDebug;
 class Mangler;
@@ -78,7 +79,7 @@ public:
   /// This is the MCStreamer object for the file we are generating. This
   /// contains the transient state for the current translation unit that we are
   /// generating (such as the current section etc).
-  MCStreamer &OutStreamer;
+  std::unique_ptr<MCStreamer> OutStreamer;
 
   /// The current machine function.
   const MachineFunction *MF;
@@ -498,6 +499,7 @@ private:
   /// Emit a blob of inline asm to the output streamer.
   void
   EmitInlineAsm(StringRef Str, const MCSubtargetInfo &STI,
+                const MCTargetOptions &MCOptions,
                 const MDNode *LocMDNode = nullptr,
                 InlineAsm::AsmDialect AsmDialect = InlineAsm::AD_ATT) const;
 

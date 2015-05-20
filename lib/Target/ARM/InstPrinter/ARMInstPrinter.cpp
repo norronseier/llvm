@@ -284,7 +284,7 @@ void ARMInstPrinter::printInst(const MCInst *MI, raw_ostream &O,
 
       if (isStore)
         NewMI.addOperand(MI->getOperand(0));
-      NewReg = MCOperand::CreateReg(MRI.getMatchingSuperReg(
+      NewReg = MCOperand::createReg(MRI.getMatchingSuperReg(
           Reg, ARM::gsub_0, &MRI.getRegClass(ARM::GPRPairRegClassID)));
       NewMI.addOperand(NewReg);
 
@@ -1379,21 +1379,8 @@ void ARMInstPrinter::printRotImmOperand(const MCInst *MI, unsigned OpNum,
   unsigned Imm = MI->getOperand(OpNum).getImm();
   if (Imm == 0)
     return;
-  O << ", ror " << markup("<imm:") << "#";
-  switch (Imm) {
-  default:
-    assert(0 && "illegal ror immediate!");
-  case 1:
-    O << "8";
-    break;
-  case 2:
-    O << "16";
-    break;
-  case 3:
-    O << "24";
-    break;
-  }
-  O << markup(">");
+  assert(Imm <= 3 && "illegal ror immediate!");
+  O << ", ror " << markup("<imm:") << "#" << 8 * Imm << markup(">");
 }
 
 void ARMInstPrinter::printModImmOperand(const MCInst *MI, unsigned OpNum,

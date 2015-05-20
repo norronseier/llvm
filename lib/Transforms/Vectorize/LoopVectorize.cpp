@@ -280,12 +280,12 @@ protected:
   /// originated from one scalar instruction.
   typedef SmallVector<Value*, 2> VectorParts;
 
-  // When we if-convert we need create edge masks. We have to cache values so
-  // that we don't end up with exponential recursion/IR.
+  // When we if-convert we need to create edge masks. We have to cache values
+  // so that we don't end up with exponential recursion/IR.
   typedef DenseMap<std::pair<BasicBlock*, BasicBlock*>,
                    VectorParts> EdgeMaskCache;
 
-  /// \brief Add checks for strides that where assumed to be 1.
+  /// \brief Add checks for strides that were assumed to be 1.
   ///
   /// Returns the last check instruction and the first check instruction in the
   /// pair as (first, last).
@@ -3828,49 +3828,6 @@ bool LoopVectorizationLegality::canVectorizeMemory() {
   return true;
 }
 
-bool llvm::isInductionPHI(PHINode *Phi, ScalarEvolution *SE,
-                          ConstantInt *&StepValue) {
-  Type *PhiTy = Phi->getType();
-  // We only handle integer and pointer inductions variables.
-  if (!PhiTy->isIntegerTy() && !PhiTy->isPointerTy())
-    return false;
-
-  // Check that the PHI is consecutive.
-  const SCEV *PhiScev = SE->getSCEV(Phi);
-  const SCEVAddRecExpr *AR = dyn_cast<SCEVAddRecExpr>(PhiScev);
-  if (!AR) {
-    DEBUG(dbgs() << "LV: PHI is not a poly recurrence.\n");
-    return false;
-  }
-
-  const SCEV *Step = AR->getStepRecurrence(*SE);
-  // Calculate the pointer stride and check if it is consecutive.
-  const SCEVConstant *C = dyn_cast<SCEVConstant>(Step);
-  if (!C)
-    return false;
-
-  ConstantInt *CV = C->getValue();
-  if (PhiTy->isIntegerTy()) {
-    StepValue = CV;
-    return true;
-  }
-
-  assert(PhiTy->isPointerTy() && "The PHI must be a pointer");
-  Type *PointerElementType = PhiTy->getPointerElementType();
-  // The pointer stride cannot be determined if the pointer element type is not
-  // sized.
-  if (!PointerElementType->isSized())
-    return false;
-
-  const DataLayout &DL = Phi->getModule()->getDataLayout();
-  int64_t Size = static_cast<int64_t>(DL.getTypeAllocSize(PointerElementType));
-  int64_t CVSize = CV->getSExtValue();
-  if (CVSize % Size)
-    return false;
-  StepValue = ConstantInt::getSigned(CV->getType(), CVSize / Size);
-  return true;
-}
-
 LoopVectorizationLegality::InductionKind
 LoopVectorizationLegality::isInductionVariable(PHINode *Phi,
                                                ConstantInt *&StepValue) {
@@ -4203,7 +4160,7 @@ LoopVectorizationCostModel::selectUnrollFactor(bool OptForSize,
                        std::max(1U, (R.MaxLocalUsers - 1)));
 
   // Clamp the unroll factor ranges to reasonable factors.
-  unsigned MaxInterleaveSize = TTI.getMaxInterleaveFactor();
+  unsigned MaxInterleaveSize = TTI.getMaxInterleaveFactor(VF);
 
   // Check if the user has overridden the unroll max.
   if (VF == 1) {

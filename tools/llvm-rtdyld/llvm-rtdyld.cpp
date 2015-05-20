@@ -12,7 +12,8 @@
 //===----------------------------------------------------------------------===//
 
 #include "llvm/ADT/StringMap.h"
-#include "llvm/DebugInfo/DWARF/DIContext.h"
+#include "llvm/DebugInfo/DIContext.h"
+#include "llvm/DebugInfo/DWARF/DWARFContext.h"
 #include "llvm/ExecutionEngine/RTDyldMemoryManager.h"
 #include "llvm/ExecutionEngine/RuntimeDyld.h"
 #include "llvm/ExecutionEngine/RuntimeDyldChecker.h"
@@ -22,6 +23,7 @@
 #include "llvm/MC/MCInstPrinter.h"
 #include "llvm/MC/MCInstrInfo.h"
 #include "llvm/MC/MCRegisterInfo.h"
+#include "llvm/MC/MCSubtargetInfo.h"
 #include "llvm/Object/MachO.h"
 #include "llvm/Support/CommandLine.h"
 #include "llvm/Support/DynamicLibrary.h"
@@ -227,7 +229,7 @@ static int printLineInfoForInput() {
     OwningBinary<ObjectFile> DebugObj = LoadedObjInfo->getObjectForDebug(Obj);
 
     std::unique_ptr<DIContext> Context(
-      DIContext::getDWARFContext(*DebugObj.getBinary()));
+      new DWARFContextInMemory(*DebugObj.getBinary()));
 
     // Use symbol info to iterate functions in the object.
     for (object::symbol_iterator I = DebugObj.getBinary()->symbol_begin(),
