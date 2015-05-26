@@ -28,6 +28,7 @@ static bool isUsedOutsideOfLoop(Instruction *I, Loop *L, LoopInfo *LI);
 static bool loopMayThrow(Loop *L, Loop *CurLoop, LoopInfo *LI);
 static bool subloopGuaranteedToExecute(Loop *SubLoop, Loop *ParentLoop,
                                        DominatorTree *DT);
+static bool isProfitableInstruction(Instruction *I);
 
 namespace {
   class SequentialHoistableInstrSet {
@@ -143,7 +144,7 @@ INITIALIZE_PASS_END(GLICM, "glicm", "GLICM", true, false)
 Pass *llvm::createGLICMPass() { return new GLICM(); }
 
 bool GLICM::runOnLoop(Loop *L, LPPassManager &LPM) {
-  
+
   ScalarEvolution *SCEV = &getAnalysis<ScalarEvolution>();
   DT = &getAnalysis<DominatorTreeWrapperPass>().getDomTree();
   LI = &getAnalysis<LoopInfoWrapperPass>().getLoopInfo();
@@ -225,9 +226,9 @@ bool GLICM::runOnLoop(Loop *L, LPPassManager &LPM) {
   // If there are no hoistable instructions, return from the function.
   if (HoistableSet->isEmpty())
     return false;
-  DEBUG(dbgs() << "===========================\n"); 
-  DEBUG(dbgs() << "Glicm applying in function: [" 
-               << L->getHeader()->getParent()->getName() 
+  DEBUG(dbgs() << "===========================\n");
+  DEBUG(dbgs() << "Glicm applying in function: ["
+               << L->getHeader()->getParent()->getName()
                << "], loop: " << L->getHeader()->getName() << "\n");
 
   // Clone the current loop in the preheader of its parent loop.
@@ -244,7 +245,7 @@ bool GLICM::runOnLoop(Loop *L, LPPassManager &LPM) {
   // Replace uses of the hoisted instructions in the original loop with uses of
   // results loaded from temporary arrays.
   replaceScalarsWithArrays(TripCount);
-  DEBUG(dbgs() << "===========================\n"); 
+  DEBUG(dbgs() << "===========================\n");
 
   delete SafetyInfo;
   delete HoistableSet;
@@ -611,14 +612,54 @@ void GLICM::filterUnprofitableHoists(SequentialHoistableInstrSet *HS) {
         }
       }
 
-    // Remove GEPInstrs and LoadInstrs that have no hoistable users.
-    if (isa<GetElementPtrInst>(I) || isa<LoadInst>(I) || isa<CastInst>(I)) {
-      bool Profitable = false;
+    // Check if any user of the instruction is hoistable.
+    bool AnyUserHoistable = false;
       for (User *U: I->users())
         if (Instruction *UI = dyn_cast<Instruction>(U))
-          Profitable |= (HS->isHoistable(UI));
-      if (!Profitable)
-        HS->removeInstruction(I);
+          AnyUserHoistable |= (HS->isHoistable(UI));
+
+    // Remove non-profitable (i.e. non-arithmetic) instructions that have no
+    // subsequent hoistable users. These instructions usually cause slow downs
+    // or do not bring major benefits, because they execute fast enough to
+    // eliminate any benefit of precomputing them.
+    if (!isProfitableInstruction(I) && !AnyUserHoistable) {
+      HS->removeInstruction(I);
     }
+
+    // Check if any of the instruction's operands are marked as hoistable. This
+    // means that at least one of its other operands is marked as hoistable.
+    bool AnyOperandHoistable = false;
+    for (Value *V: I->operands()) {
+      if (Instruction *VI = dyn_cast<Instruction>(V))
+        AnyOperandHoistable |= (HS->isHoistable(VI));
+    }
+
+    // Do not hoist single instructions with no subsequent hoistable users, even
+    // if they are marked as profitable. We have seen that in practice 1 single
+    // instruction rarely has a positive impact on performance.
+    if (!AnyUserHoistable && !AnyOperandHoistable)
+      HS->removeInstruction(I);
   }
+}
+
+static bool isProfitableInstruction(Instruction *I) {
+  unsigned Opcode = I->getOpcode();
+  switch (Opcode) {
+    case Instruction::Add:
+    case Instruction::FAdd:
+    case Instruction::Sub:
+    case Instruction::FSub:
+    case Instruction::Mul:
+    case Instruction::FMul:
+    case Instruction::UDiv:
+    case Instruction::SDiv:
+    case Instruction::FDiv:
+    case Instruction::URem:
+    case Instruction::SRem:
+    case Instruction::FRem:
+      return true;
+    default:
+      return false;
+  }
+  return false;
 }
