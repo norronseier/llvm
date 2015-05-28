@@ -441,7 +441,7 @@ AllocaInst *GLICM::createTemporaryArray(Instruction *I, Constant *Size,
                                       "glicm.arr." + Twine(InstrIndex++),
                                       BB->getTerminator());
   DEBUG(dbgs() << "GLICM allocating array: " << *TmpArr << " for instruction "
-               << "*I" << "\n");
+               << *I << "\n");
   NumTmpArrays++;
   return TmpArr;
 }
