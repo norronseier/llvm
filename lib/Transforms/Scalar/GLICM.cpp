@@ -93,8 +93,6 @@ namespace {
 
   private:
     // TODO: Add documentation for fields and functions.
-    long InstrIndex = 0;
-
     DominatorTree *DT;
     LoopInfo *LI;
     AliasAnalysis *AA;
@@ -416,13 +414,10 @@ void GLICM::replaceUsesWithValueInArray(Instruction *I, AllocaInst *Arr,
     // Arr[Index].
     GetElementPtrInst *GEP =
         GetElementPtrInst::Create(Arr->getAllocatedType(), Arr, GEPIndices,
-                                  "glicm.arrayidx." + Twine(InstrIndex++),
-                                  BB->getFirstNonPHI());
+                                  "glicm.arrayidx", BB->getFirstNonPHI());
 
     // Load Arr[Index].
-    LoadInst *Load = new LoadInst(GEP,
-                                  "glicm.load." + Twine(InstrIndex++),
-                                  BB->getFirstNonPHI());
+    LoadInst *Load = new LoadInst(GEP, "glicm.load", BB->getFirstNonPHI());
     Load->removeFromParent();
     Load->insertAfter(GEP);
 
@@ -437,8 +432,7 @@ void GLICM::replaceUsesWithValueInArray(Instruction *I, AllocaInst *Arr,
 /// the given BB.
 AllocaInst *GLICM::createTemporaryArray(Instruction *I, Constant *Size,
                                         BasicBlock* BB) {
-  AllocaInst *TmpArr = new AllocaInst(I->getType(), Size,
-                                      "glicm.arr." + Twine(InstrIndex++),
+  AllocaInst *TmpArr = new AllocaInst(I->getType(), Size, "glicm.arr",
                                       BB->getTerminator());
   DEBUG(dbgs() << "GLICM allocating array: " << *TmpArr << " for instruction "
                << *I << "\n");
@@ -456,7 +450,7 @@ void GLICM::storeInstructionInArray(Instruction *I, AllocaInst *Arr,
   // First compute the address at which to store I using a GEP instruction.
   GetElementPtrInst *GEP =
       GetElementPtrInst::Create(Arr->getAllocatedType(), Arr, GEPIndices,
-                                "glicm.arrayidx." + Twine(InstrIndex++), I);
+                                "glicm.arrayidx", I);
 
   // Workaround: we need to specify a location for S when we create it, but the
   // only options are either (a) at the end of BB or (b) before an instruction.
