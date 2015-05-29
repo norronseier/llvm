@@ -216,24 +216,27 @@ bool GLICM::runOnLoop(Loop *L, LPPassManager &LPM) {
   SafetyInfo = new LICMSafetyInfo();
   computeLICMSafetyInfo(SafetyInfo, CurLoop);
 
-  // Gather hoistable instructions and filter the unprofitable ones.
+  // Gather hoistable instructions.
   HoistableSet = new SequentialHoistableInstrSet();
   gatherHoistableInstructions(DT->getNode(L->getHeader()));
+
+  // Filter unprofitable hoists according to the cost model.
   filterUnprofitableHoists(HoistableSet);
 
   // If there are no hoistable instructions, return from the function.
   if (HoistableSet->isEmpty())
     return false;
-  DEBUG(dbgs() << "===========================\n");
-  DEBUG(dbgs() << "Glicm applying in function: ["
-               << L->getHeader()->getParent()->getName()
-               << "], loop: " << L->getHeader()->getName() << "\n");
 
   // Clone the current loop in the preheader of its parent loop.
   createMirrorLoop(ParentLoop, TripCount);
 
+  DEBUG(dbgs() << "===========================\n");
+  DEBUG(dbgs() << "Glicm applying in function: ["
+               << L->getHeader()->getParent()->getName()
+               << "], loop: " << L->getHeader()->getName() << "\n");
   std::vector<Instruction*> HoistableInstrVector =
     HoistableSet->getHoistableInstructions();
+
   for (unsigned i = 0; i < HoistableInstrVector.size(); i++) {
     Instruction *I = HoistableInstrVector[i];
     hoist(I, ClonedLoopHeader);
