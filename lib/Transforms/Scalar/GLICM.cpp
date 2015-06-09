@@ -599,22 +599,16 @@ void GLICM::filterUnprofitableHoists(SequentialHoistableInstrSet *HS) {
     if (!HS->isHoistable(I))
       continue;
 
-    // If this instruction is used as input by the PHI node of the canonical
-    // IV, do not hoist it. Remove it and all its users (most likely a CmpInst
-    // based on this value) from the list of hoistable instructions.
-    for (User *U : I->users())
-      if (Instruction *UI = dyn_cast<Instruction>(U)) {
-        if (UI == IndVar) {
-          HS->removeInstructionAndUsersRecursively(I);
-          break;
-        }
-      }
-
-    // Check if any user of the instruction is hoistable.
+    // Check if any user of the instruction is hoistable or if the instruction
+    // is used by the current loop's canonical induction variable.
     bool AnyUserHoistable = false;
-      for (User *U: I->users())
-        if (Instruction *UI = dyn_cast<Instruction>(U))
-          AnyUserHoistable |= (HS->isHoistable(UI));
+    bool UsedByIndVar = false;
+    for (User *U: I->users())
+      if (Instruction *UI = dyn_cast<Instruction>(U)) {
+        AnyUserHoistable |= (HS->isHoistable(UI));
+        if (UI == IndVar)
+          UsedByIndVar = true;
+      }
 
     // Remove non-profitable (i.e. non-arithmetic) instructions that have no
     // subsequent hoistable users. These instructions usually cause slow downs
@@ -624,17 +618,20 @@ void GLICM::filterUnprofitableHoists(SequentialHoistableInstrSet *HS) {
       HS->removeInstruction(I);
     }
 
-    // Check if any of the instruction's operands are marked as hoistable. This
-    // means that at least one of its other operands is marked as hoistable.
+    // If this instruction is used as input by the PHI node of the canonical
+    // IV, do not hoist it. Remove it and all its users (most likely a CmpInst
+    // based on this value) from the list of hoistable instructions.
+    if (UsedByIndVar)          
+      HS->removeInstructionAndUsersRecursively(I);
+    
+    // Check if any of the instruction's operands is in the hoistable set.
     bool AnyOperandHoistable = false;
     for (Value *V: I->operands()) {
       if (Instruction *VI = dyn_cast<Instruction>(V))
         AnyOperandHoistable |= (HS->isHoistable(VI));
     }
 
-    // Do not hoist single instructions with no subsequent hoistable users, even
-    // if they are marked as profitable. We have seen that in practice 1 single
-    // instruction rarely has a positive impact on performance.
+    // Do not hoist instructions with no users or operands in the hoistable set.
     if (!AnyUserHoistable && !AnyOperandHoistable)
       HS->removeInstruction(I);
   }
