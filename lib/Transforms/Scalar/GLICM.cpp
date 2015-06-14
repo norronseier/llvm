@@ -602,13 +602,9 @@ void GLICM::filterUnprofitableHoists(SequentialHoistableInstrSet *HS) {
     // Check if any user of the instruction is hoistable or if the instruction
     // is used by the current loop's canonical induction variable.
     bool AnyUserHoistable = false;
-    bool UsedByIndVar = false;
     for (User *U: I->users())
-      if (Instruction *UI = dyn_cast<Instruction>(U)) {
+      if (Instruction *UI = dyn_cast<Instruction>(U))
         AnyUserHoistable |= (HS->isHoistable(UI));
-        if (UI == IndVar)
-          UsedByIndVar = true;
-      }
 
     // Remove non-profitable (i.e. non-arithmetic) instructions that have no
     // subsequent hoistable users. These instructions usually cause slow downs
@@ -618,12 +614,6 @@ void GLICM::filterUnprofitableHoists(SequentialHoistableInstrSet *HS) {
       HS->removeInstruction(I);
     }
 
-    // If this instruction is used as input by the PHI node of the canonical
-    // IV, do not hoist it. Remove it and all its users (most likely a CmpInst
-    // based on this value) from the list of hoistable instructions.
-    if (UsedByIndVar)          
-      HS->removeInstructionAndUsersRecursively(I);
-    
     // Check if any of the instruction's operands is in the hoistable set.
     bool AnyOperandHoistable = false;
     for (Value *V: I->operands()) {
@@ -652,6 +642,7 @@ static bool isProfitableInstruction(Instruction *I) {
     case Instruction::URem:
     case Instruction::SRem:
     case Instruction::FRem:
+    case Instruction::Call:
       return true;
     default:
       return false;
