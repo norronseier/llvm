@@ -140,7 +140,7 @@ Pass *createLICMPass();
 
 //===----------------------------------------------------------------------===//
 //
-// GLICM - This pass is a generalized version of LICM above.
+// GLICM - This pass is a generalized version of loop-invariant code motion.
 //
 Pass *createGLICMPass();
 

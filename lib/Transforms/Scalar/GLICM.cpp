@@ -30,6 +30,9 @@ static bool subloopGuaranteedToExecute(Loop *SubLoop, Loop *ParentLoop,
                                        DominatorTree *DT);
 static bool isProfitableInstruction(Instruction *I);
 
+
+// A custom sequential container which maintains insertion order for its
+// elements and contains a simple interface for membership testing.
 namespace {
   class SequentialHoistableInstrSet {
     std::vector<Instruction*> HoistableInstrVector;
@@ -92,24 +95,27 @@ namespace {
     }
 
   private:
-    // TODO: Add documentation for fields and functions.
-    DominatorTree *DT;
-    LoopInfo *LI;
-    AliasAnalysis *AA;
-    AliasSetTracker *CurAST;
+    DominatorTree *DT;          // The function's dominator tree.
+    LoopInfo *LI;               // LoopInfo for the current loop.
+    AliasAnalysis *AA;          // AliasAnalysis information.
+    AliasSetTracker *CurAST;    // Alias set tracker computed from AA.
+    LICMSafetyInfo *SafetyInfo; // Struct containing safety info on the loop.
+
+    // Mapping that helps us reuse alias set trackers from inner loops.
     DenseMap<Loop*, AliasSetTracker*> LoopToAliasSetMap;
-    LICMSafetyInfo *SafetyInfo;
 
-    Loop *CurLoop;
-    Loop *ParentLoop;
+    Loop *CurLoop;      // The current loop.
+    Loop *ParentLoop;   // The parent loop.
 
-    PHINode *IndVar;
-    PHINode *ClonedLoopIndVar;
+    PHINode *IndVar;            // Induction variable of the current loop.
+    PHINode *ClonedLoopIndVar;  // Induction variable of the cloned loop.
 
+    // Loop regions of the cloned loop.
     BasicBlock *ClonedLoopHeader;
     BasicBlock *ClonedLoopLatch;
     BasicBlock *ClonedLoopPreheader;
 
+    // The hoistable set for the current loop.
     SequentialHoistableInstrSet *HoistableSet;
 
     void createMirrorLoop(Loop *L, unsigned TripCount);
@@ -142,7 +148,7 @@ INITIALIZE_PASS_END(GLICM, "glicm", "GLICM", true, false)
 Pass *llvm::createGLICMPass() { return new GLICM(); }
 
 bool GLICM::runOnLoop(Loop *L, LPPassManager &LPM) {
-
+  // Collect result of analysis pass dependencies.
   ScalarEvolution *SCEV = &getAnalysis<ScalarEvolution>();
   DT = &getAnalysis<DominatorTreeWrapperPass>().getDomTree();
   LI = &getAnalysis<LoopInfoWrapperPass>().getLoopInfo();
@@ -152,14 +158,15 @@ bool GLICM::runOnLoop(Loop *L, LPPassManager &LPM) {
   unsigned TripCount = SCEV->getSmallConstantTripCount(L);
   IndVar = L->getCanonicalInductionVariable();
   ParentLoop = L->getParentLoop();
-
+  
+  // Check whether there is any exception in the body of the parent loop.
   bool ParentLoopMayThrow = false;
   if (ParentLoop)
     ParentLoopMayThrow = loopMayThrow(ParentLoop, CurLoop, LI);
 
-  // Compute the Alias Set Tracker.
+  // Compute the Alias Set Tracker, using information cached from previous
+  // (inner) loops.
   CurAST = new AliasSetTracker(*AA);
-  // Collect Alias information from subloops.
   for (Loop::iterator LoopItr = L->begin(), LoopItrE = L->end();
        LoopItr != LoopItrE; ++LoopItr) {
     Loop *InnerL = *LoopItr;
@@ -200,8 +207,8 @@ bool GLICM::runOnLoop(Loop *L, LPPassManager &LPM) {
   //    pre-header.
   // 2) have a parent loop which is in loop simplify form (to ensure the
   //    loop has a valid pre-header).
-  // 3) be guaranteed to execute in the parent loop (entry to these loops must
-  //    not be guarded by a condition).
+  // 3) be guaranteed to execute in the parent loop (e.g. entry to these loops
+  //    must not be guarded by a conditional).
   // 4) not have a parent loop that contains throwing instructions.
   if (!(ParentLoop &&
         ParentLoop->isLoopSimplifyForm() &&
@@ -216,7 +223,7 @@ bool GLICM::runOnLoop(Loop *L, LPPassManager &LPM) {
   SafetyInfo = new LICMSafetyInfo();
   computeLICMSafetyInfo(SafetyInfo, CurLoop);
 
-  // Gather hoistable instructions.
+  // Compute the hoistable set.
   HoistableSet = new SequentialHoistableInstrSet();
   gatherHoistableInstructions(DT->getNode(L->getHeader()));
 
@@ -230,13 +237,15 @@ bool GLICM::runOnLoop(Loop *L, LPPassManager &LPM) {
   // Clone the current loop in the preheader of its parent loop.
   createMirrorLoop(ParentLoop, TripCount);
 
-  DEBUG(dbgs() << "===========================\n");
   DEBUG(dbgs() << "Glicm applying in function: ["
                << L->getHeader()->getParent()->getName()
                << "], loop: " << L->getHeader()->getName() << "\n");
   std::vector<Instruction*> HoistableInstrVector =
     HoistableSet->getHoistableInstructions();
 
+  // Hoist each instruction present in the hoistable set after the cost model
+  // was applied. Replace any references to the original loop's IV with the
+  // cloned loop's IV.
   for (unsigned i = 0; i < HoistableInstrVector.size(); i++) {
     Instruction *I = HoistableInstrVector[i];
     hoist(I, ClonedLoopHeader);
@@ -246,8 +255,8 @@ bool GLICM::runOnLoop(Loop *L, LPPassManager &LPM) {
   // Replace uses of the hoisted instructions in the original loop with uses of
   // results loaded from temporary arrays.
   replaceScalarsWithArrays(TripCount);
-  DEBUG(dbgs() << "===========================\n");
 
+  // Clean up data structures
   delete SafetyInfo;
   delete HoistableSet;
   return true;
@@ -344,8 +353,8 @@ bool GLICM::isInvariantForGLICM(Value *V, Loop *OuterLoop) {
   return true;
 }
 
-/// Stores all definitions in the cloned loop who have uses in the original loop
-/// into arrays.
+/// Stores all definitions in the cloned loop with uses in the original loop
+/// into temporary arrays.
 void GLICM::replaceScalarsWithArrays(unsigned TripCount) {
   std::vector<Instruction*> InstrUsedOutsideLoop;
 
@@ -367,7 +376,7 @@ void GLICM::replaceScalarsWithArrays(unsigned TripCount) {
   if (InstrUsedOutsideLoop.empty())
     return;
 
-  // Create a BasicBlock for array definitions.
+  // Create a new BasicBlock for array definitions.
   BasicBlock *ArrBlock = SplitEdge(ClonedLoopPreheader, ClonedLoopHeader, DT, LI);
   ArrBlock->setName(ClonedLoopHeader->getName() + Twine(".arr"));
   Constant *ArrSize = ConstantInt::getSigned(ClonedLoopIndVar->getType(),
@@ -464,81 +473,13 @@ void GLICM::storeInstructionInArray(Instruction *I, AllocaInst *Arr,
   S->insertAfter(I);
 }
 
-/// Moves I at the end of InsertionBlock.
-static bool hoist(Instruction *I, BasicBlock *InsertionBlock) {
-  DEBUG(dbgs() << "GLICM hoisting to " << InsertionBlock->getName() << ": "
-        << *I << "\n");
-  I->moveBefore(InsertionBlock->getTerminator());
-  NumHoisted++;
-  return true;
-}
-
-/// Replaces all uses of Old with New amongst I's operands.
-static void replaceIndVarOperand(Instruction *I, PHINode *Old, PHINode *New) {
-  for (unsigned i = 0, e = I->getNumOperands(); i != e; ++i)
-    if (PHINode *PhiOp = dyn_cast<PHINode>(I->getOperand(i)))
-      if (PhiOp == Old)
-        I->replaceUsesOfWith(Old, New);
-}
-
-/// Returns true if BB is part of CurLoop.
-static bool inSubLoop(BasicBlock *BB, Loop *CurLoop, LoopInfo *LI) {
-  assert(CurLoop->contains(BB) && "Only valid if BB is IN the loop");
-  return LI->getLoopFor(BB) != CurLoop;
-}
-
-/// Returns true if any uses of I lie outside of the loop L.
-static bool isUsedOutsideOfLoop(Instruction *I, Loop *L, LoopInfo *LI) {
-  for (User *U : I->users())
-    if (Instruction *UserI = dyn_cast<Instruction>(U))
-      if (LI->getLoopFor(UserI->getParent()) != L)
-        return true;
-  return false;
-}
-
-/// Returns true if any instruction in OuterLoop which is not part of CurLoop
-/// may throw an exception (assumes CurLoop is a subloop of InnerLoop).
-static bool loopMayThrow(Loop *OuterLoop, Loop *CurLoop, LoopInfo *LI) {
-  bool MayThrow = false;
-
-  // Check if any instruction within OuterLoop which does not belong to CurLoop
-  // may throw.
-
-  // This is a coarse-grained check, similar to what LICM does in the
-  // computeLICMSafetyInfo function. More refined checks are possible, such as
-  // checking whether the throwing instructions appear before or after the
-  // current loop.
-  for (Loop::block_iterator BB = OuterLoop->block_begin(),
-       BBE = OuterLoop->block_end(); (BB != BBE) && !MayThrow ; ++BB)
-    if (LI->getLoopFor(*BB) != CurLoop)
-      for (BasicBlock::iterator I = (*BB)->begin(), E = (*BB)->end();
-           (I != E) && !MayThrow; ++I) {
-        MayThrow |= I->mayThrow();
-      }
-  return MayThrow;
-}
-
-/// Returns true if SubLoop (which must be a subloop of ParentLoop) is not
-/// guarded by any condition, and thus is guaranteed to execute.
-static bool subloopGuaranteedToExecute(Loop *SubLoop, Loop *ParentLoop,
-                                       DominatorTree *DT) {
-  BasicBlock *SubLoopHeader = SubLoop->getHeader();
-
-  SmallVector<BasicBlock*, 8> ParentLoopExitBlocks;
-  ParentLoop->getExitBlocks(ParentLoopExitBlocks);
-
-  for (int i = 0, e = ParentLoopExitBlocks.size(); i < e; i++)
-    if (!DT->dominates(SubLoopHeader, ParentLoopExitBlocks[i]))
-      return false;
-
-  return true;
-}
-
-/// Applies generalized loop-invariant code motion to the current loop.
+/// Populates the hoistable set with hoistable instructions from the current
+/// loop.
 bool GLICM::gatherHoistableInstructions(DomTreeNode* N) {
   bool Changed = false;
   BasicBlock *BB = N->getBlock();
-
+  // We traverse basic blocks in the order dictated by the dominator tree,
+  // which allows us to visit definitions of values before uses.
   if (!CurLoop->contains(BB))
     return Changed;
 
@@ -561,6 +502,7 @@ bool GLICM::gatherHoistableInstructions(DomTreeNode* N) {
   return Changed;
 }
 
+/// Returns true if I can be hoisted out of the current loop.
 bool GLICM::canHoist(Instruction *I) {
   return hasLoopInvariantOperands(I, ParentLoop) &&
          canSinkOrHoistInst(*I, AA, DT, CurLoop, CurAST, SafetyInfo) &&
@@ -622,9 +564,82 @@ void GLICM::filterUnprofitableHoists(SequentialHoistableInstrSet *HS) {
     }
 
     // Do not hoist instructions with no users or operands in the hoistable set.
+    // These are essentially subexpressions consisting of a single instruction.
     if (!AnyUserHoistable && !AnyOperandHoistable)
       HS->removeInstruction(I);
   }
+}
+
+/// Moves I at the end of InsertionBlock.
+static bool hoist(Instruction *I, BasicBlock *InsertionBlock) {
+  DEBUG(dbgs() << "GLICM hoisting to " << InsertionBlock->getName() << ": "
+        << *I << "\n");
+  I->moveBefore(InsertionBlock->getTerminator());
+  NumHoisted++;
+  return true;
+}
+
+/// Replaces all uses of Old with New amongst I's operands.
+static void replaceIndVarOperand(Instruction *I, PHINode *Old, PHINode *New) {
+  for (unsigned i = 0, e = I->getNumOperands(); i != e; ++i)
+    if (PHINode *PhiOp = dyn_cast<PHINode>(I->getOperand(i)))
+      if (PhiOp == Old)
+        I->replaceUsesOfWith(Old, New);
+}
+
+/// Returns true if BB is part of CurLoop.
+static bool inSubLoop(BasicBlock *BB, Loop *CurLoop, LoopInfo *LI) {
+  assert(CurLoop->contains(BB) && "BB must be contained in CurLoop.");
+  return LI->getLoopFor(BB) != CurLoop;
+}
+
+/// Returns true if any uses of I lie outside of the loop L.
+static bool isUsedOutsideOfLoop(Instruction *I, Loop *L, LoopInfo *LI) {
+  for (User *U : I->users())
+    if (Instruction *UserI = dyn_cast<Instruction>(U))
+      if (LI->getLoopFor(UserI->getParent()) != L)
+        return true;
+  return false;
+}
+
+/// Returns true if any instruction in OuterLoop which is not part of CurLoop
+/// may throw an exception (assumes CurLoop is a subloop of InnerLoop).
+static bool loopMayThrow(Loop *OuterLoop, Loop *CurLoop, LoopInfo *LI) {
+  bool MayThrow = false;
+
+  // Check if any instruction within OuterLoop which does not belong to CurLoop
+  // may throw.
+
+  // This is a coarse-grained check, similar to what LICM does in the
+  // computeLICMSafetyInfo function. More refined checks are possible, such as
+  // checking whether the throwing instructions appear before or after the
+  // current loop.
+  for (Loop::block_iterator BB = OuterLoop->block_begin(),
+       BBE = OuterLoop->block_end(); (BB != BBE) && !MayThrow ; ++BB)
+    if (LI->getLoopFor(*BB) != CurLoop)
+      for (BasicBlock::iterator I = (*BB)->begin(), E = (*BB)->end();
+           (I != E) && !MayThrow; ++I) {
+        MayThrow |= I->mayThrow();
+      }
+  return MayThrow;
+}
+
+/// Returns true if SubLoop (which must be a subloop of ParentLoop) is not
+/// guarded by any condition, and thus guaranteed to execute.
+static bool subloopGuaranteedToExecute(Loop *SubLoop, Loop *ParentLoop,
+                                       DominatorTree *DT) {
+  BasicBlock *SubLoopHeader = SubLoop->getHeader();
+
+  SmallVector<BasicBlock*, 8> ParentLoopExitBlocks;
+  ParentLoop->getExitBlocks(ParentLoopExitBlocks);
+
+  // Check that the header of SubLoop dominates all the exit blocks of
+  // ParentLoop.
+  for (int i = 0, e = ParentLoopExitBlocks.size(); i < e; i++)
+    if (!DT->dominates(SubLoopHeader, ParentLoopExitBlocks[i]))
+      return false;
+
+  return true;
 }
 
 static bool isProfitableInstruction(Instruction *I) {

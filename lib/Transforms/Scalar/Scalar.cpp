@@ -27,7 +27,6 @@ using namespace llvm;
 /// initializeScalarOptsPasses - Initialize all passes linked into the
 /// ScalarOpts library.
 void llvm::initializeScalarOpts(PassRegistry &Registry) {
-  initializeGLICMPass(Registry);
   initializeADCEPass(Registry);
   initializeBDCEPass(Registry);
   initializeAlignmentFromAssumptionsPass(Registry);
@@ -39,6 +38,7 @@ void llvm::initializeScalarOpts(PassRegistry &Registry) {
   initializeDeadInstEliminationPass(Registry);
   initializeScalarizerPass(Registry);
   initializeDSEPass(Registry);
+  initializeGLICMPass(Registry);
   initializeGVNPass(Registry);
   initializeEarlyCSELegacyPassPass(Registry);
   initializeFlattenCFGPassPass(Registry);
