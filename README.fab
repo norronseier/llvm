@@ -1,0 +1,114 @@
+1) Building LLVM
+========================================
+
+Full guide:
+http://llvm.org/docs/GettingStarted.html#compiling-the-llvm-suite-source-code
+
+Simplest way is to build using the cmake tool. A full guide for this is found at:
+http://llvm.org/docs/CMake.html
+
+The process:
+- Checkout the LLVM code in a directory e.g. DIR/llvm
+- Checkout Clang in DIR/llvm/tools
+- Checkout compiler-rt in DIR/llvm/projects
+- Checkout the LLVM Test suite in DIR/llvm/projects
+- Create a fresh new directory, e.g. DIR/llvm-build
+- Change into DIR/llvm-build
+- Simplest option: run cmake $(path_to_llvm), e.g. cmake DIR/llvm.
+    * If you want to use an IDE, enter 'cmake' and at the end you'll see a list of
+      detected IDEs on your machine. To tell cmake to generate project files for an IDE
+      such as Eclipse, run cmake -G $(name_of_ide) DIR/llvm.
+    * You will probably want to make a 'debug' build, which enables debug info in the LLVM
+      tools but makes the binaries a lot larger (e.g. from 50MB to 950MB).
+      In this case pass -DCMAKE_BUILD_TYPE=Debug to cmake.
+- Pass -j16 to enable parallelism in the build process.
+
+Thus, command-line chain for building LLVM:
+cd DIR
+git clone https://github.com/norronseier/llvm.git
+cd DIR/llvm/tools
+git clone http://llvm.org/git/clang.git
+cd DIR/llvm/projects
+git clone http://llvm.org/git/compiler-rt.git
+git clone http://llvm.org/git/test-suite.git
+cd DIR
+mkdir llvm-build
+cd llvm-build
+cmake DIR/llvm -DCMAKE_BUILD_TYPE=Debug -j16
+
+The binaries for clang and all the other LLVM-based tools will be placed in:
+
+    DIR/llvm-build/bin
+
+In particular, clang and clang++ are symbolic links to the actual clang binary,
+which is called something like clang-version (e.g. clang-3.7)
+
+
+
+3) Browsing the source code
+========================================
+The most important parts of the source tree for us are:
+
+  DIR/llvm/lib/Transforms/Scalar/GLICM.cpp              # the GLICM pass
+  DIR/llvm/lib/Transforms/IPO/PassManagerBuilder.cpp    # defines Clang's optimization sequence (search for GLICM)
+  DIR/llvm/projects/test-suite                          # the root of the LLVM test suite.
+
+
+4) Running the test suite
+========================================
+
+The complete guide is here (and please refer to it if anything here is unclear):
+    
+    http://llvm.org/docs/lnt/quickstart.html
+
+You need to install the LNT tool:
+- sudo easy_install virtualenv                              # Install virtualenv (if not already present)
+- virtualenv DIR/lnt-sandbox                                # Create a sandbox for LNT
+- git clone https://github.com/llvm-mirror/lnt              # Download the source code for the tool (anywhere you want, e.g. DIR/lnt)
+- DIR/lnt-sandbox/bin/python DIR/lnt/setup.py develop       # Install LNT into the virtual environment
+
+After this is done, the LNT tool is available and ready to use in DIR/lnt-sandbox/bin/lnt.
+
+To run the test-suite a repeated number of times, you should first create another directory (e.g. lnt-results) 
+and then use a script that does something like this:
+
+TIMES=$1
+for ((i=0; i<$TIMES; i++));
+do
+  DATE=`date +%Y%m%d-%H%M%S`
+  TESTDIR=DIR/lnt-results/$DATE
+  ./lnt runtest nt --no-timestamp --sandbox $TESTDIR --cc DIR/llvm-build/bin/clang --cxx DIR/llvm-build/bin/clang++ --test-suite DIR/llvm/projects/test-suite/ --only-test SingleSource --build-threads 16
+done
+
+The script above does the following:
+  - executes only the singlesource tests (--only-test SingleSource)
+  - builds on 16 threads (--build-threads 16) but executes a single thread
+  - creates a timestamped directory for storing each test results
+  - reports of test runs are generated in a report.json file
+  - the --cc and --cxx flags are paths to the C / C++ compiler under test
+
+To visualize these in the web browser:
+  - ./lnt create DIR/lnt-servers
+  - ./lnt import --commit=1 DIR/lnt-servers $(multiple_json_files)
+  - go to localhost:8000
+
+Again, please refer to the official documentation if you encounter any trouble:
+
+    http://llvm.org/docs/lnt/quickstart.html
+
+5) Running non-LLVM benchmarks & different versions of clang
+========================================
+
+Running non-LLVM benchmarks is simply a matter of compiling the programs with different
+versions of clang and then timing them (using either Unix's time or benchmark-specific
+tools). You may want to obtain different versions of Clang when benchmarking:
+    - To obtain Clang without GLICM, just comment out the GLICM line in
+      llvm/lib/Transforms/IPO/PassManagerBuilder.cpp
+    - To obtain Clang with GLICM (without cost model), comment out the
+      filterUnprofitableHoists() call in the runOnLoop function in GLICM.cpp
+    - To place GLICM at a different (or multiple) location(s) in Clang's optimization
+      pipeline, modify llvm/lib/Transforms/IPO/PassManagerBuilder.cpp's
+      populateModulePassManager function (issue more calls to MPM.add(createGLICMPass()) )
+
+To re-compile clang, go to the llvm build directory (e.g. /home/llvm-build) and issue
+'make clang -j16'. This should rebuild clang only.
