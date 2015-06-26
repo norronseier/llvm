@@ -44,8 +44,7 @@ In particular, clang and clang++ are symbolic links to the actual clang binary,
 which is called something like clang-version (e.g. clang-3.7)
 
 
-
-3) Browsing the source code
+2) Browsing the source code
 ========================================
 The most important parts of the source tree for us are:
 
@@ -54,7 +53,7 @@ The most important parts of the source tree for us are:
   DIR/llvm/projects/test-suite                          # the root of the LLVM test suite.
 
 
-4) Running the test suite
+3) Running the test suite
 ========================================
 
 The complete guide is here (and please refer to it if anything here is unclear):
@@ -96,16 +95,20 @@ Again, please refer to the official documentation if you encounter any trouble:
 
     http://llvm.org/docs/lnt/quickstart.html
 
-5) Running non-LLVM benchmarks & different versions of clang
+
+4) Running non-LLVM benchmarks & different versions of clang
 ========================================
 
 Running non-LLVM benchmarks is simply a matter of compiling the programs with different
 versions of clang and then timing them (using either Unix's time or benchmark-specific
 tools). You may want to obtain different versions of Clang when benchmarking:
+
     - To obtain Clang without GLICM, just comment out the GLICM line in
       llvm/lib/Transforms/IPO/PassManagerBuilder.cpp
+
     - To obtain Clang with GLICM (without cost model), comment out the
       filterUnprofitableHoists() call in the runOnLoop function in GLICM.cpp
+
     - To place GLICM at a different (or multiple) location(s) in Clang's optimization
       pipeline, modify llvm/lib/Transforms/IPO/PassManagerBuilder.cpp's
       populateModulePassManager function (issue more calls to MPM.add(createGLICMPass()) )
